@@ -11,6 +11,7 @@ coverage/
 
 # Local-only material (assignment text is not ours to publish)
 docs/ASSIGNMENT.md
+docs/notes-ka.md
 
 # Tooling / editors
 .claude/
