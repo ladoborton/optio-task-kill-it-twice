@@ -1,0 +1,25 @@
+# Dependencies & build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local-only material (assignment text is not ours to publish)
+docs/ASSIGNMENT.md
+
+# Tooling / editors
+.claude/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs & verify output
+*.log
+verify/out/
