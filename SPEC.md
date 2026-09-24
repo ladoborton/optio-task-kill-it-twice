@@ -5,6 +5,7 @@
 | Version | Date       | Summary |
 |---------|------------|---------|
 | v1      | 2026-09-24 | Initial spec, written before any code. Decisions marked **(tentative)** and everything in §14 are expected to change once measured. |
+| v1.1    | 2026-09-24 | **Data access: TypeORM with hot-path rules (§5.6)** instead of the implied raw `pg`. Why: the first argument against an ORM (race in consumer dedup) was really about `repository.save()`, not TypeORM — QueryBuilder expresses the same atomic SQL. TypeORM gives the Nest-idiomatic structure (entities, migrations, DI) the team expects; the rules keep the critical SQL explicit. Added one-shot `migrate` service (§5.1) and single-gate verify runs (§11). |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -47,7 +48,8 @@ Three solid gates beat five half-working ones.
 
 ## 3. Constraints
 
-- Stack: **NestJS** (TypeScript), **Vue 3 + Vite**, **Postgres**, **Elasticsearch**, **RabbitMQ**, Docker Compose.
+- Stack: **NestJS** (TypeScript) + **TypeORM** (rules in §5.6), **Vue 3 + Vite**, **Postgres**, **Elasticsearch**,
+  **RabbitMQ**, Docker Compose.
 - Time: ~7 calendar days left at the time of writing (deadline 2026-10-01 12:13).
 - Runs on a single laptop. **Only Docker is required on the host** (no local `make`, Node or psql needed —
   the author's own machine has no `make`).
@@ -145,6 +147,7 @@ One NestJS codebase (`apps/server`), one Docker image, started in three roles vi
 | `pipeline` | backfill loop + incremental loop, `/metrics` | the thing `verify` kills; must not take the API down with it |
 | `consumer` | independent RabbitMQ consumer with its own projection | assignment requires an independent consumer |
 | `api`      | REST for UI and verify, status aggregation, control, simulation | stays up while pipeline is killed, so recovery is observable |
+| `migrate`  | one-shot: runs TypeORM migrations, then exits | the three roles start in parallel; only one process may migrate. Others `depends_on: service_completed_successfully` |
 | `ui`       | Vue 3 SPA, served by nginx | |
 | `postgres`, `elasticsearch`, `rabbitmq` | infrastructure | |
 
@@ -210,6 +213,22 @@ earlier) writes v4 over it. Prevented by the sinks, not by locking:
   not greater than the stored one. A `409 version_conflict` is treated as **success** (a newer or identical
   version is already there).
 - **Consumer:** applies an event only if `version` > the version in its projection (§6.3).
+
+### 5.6 Data access rules (TypeORM)
+
+TypeORM provides the connection, entities (schema as code), migrations and repository injection.
+It is **not** allowed to hide the SQL that the guarantees depend on:
+
+1. **No read-then-write in `pipeline` and `consumer`.** `repository.save()`, or `find*()` followed by a
+   write, is forbidden there. Compare-and-write must be a single SQL statement via QueryBuilder or
+   `query()` (e.g. `UPDATE … WHERE id = :id AND version < :v`, `INSERT … ON CONFLICT DO NOTHING`).
+2. **Hot loops use raw results.** Backfill/incremental reads use `getRawMany()` / `query()`, never
+   `getMany()` — no entity hydration for 1M rows under a 256 MB limit.
+3. **Schema changes only through migrations.** `synchronize: false` everywhere. Triggers and functions live
+   in migrations as raw SQL. An applied migration is never edited; a new one is added.
+4. **Always bound parameters** (`:name` / `$1`), never string concatenation into SQL.
+
+In `api` (DLQ list, settings, checkpoints, status) ordinary repository usage is fine.
 
 ## 6. Delivery guarantee
 
@@ -332,15 +351,16 @@ Gates run in order on the same dataset; a failed gate prints `FAIL (reason)` and
 | G4 | Wait for idle; set batch_size 500; insert 500 rows in one transaction, 3 with bad `attributes` | 497 in ES, 3 `pending` in `dlq_records` with the same `batch_id` and error reason; then fix source + replay ⇒ 3 `replayed` |
 | G5 | Query `/metrics` and `/api/status` | all fields of §8.2 present and consistent with what G1–G4 just did (e.g. DLQ count matches G4) |
 
-Exit code non-zero if any gate fails.
+Exit code non-zero if any gate fails. `./verify.sh G1` runs a single gate (used while building a slice:
+the gate is added first and must FAIL before the feature exists, then PASS).
 
 ## 12. Repo layout & commands
 
 ```
-apps/server/        NestJS; src/roles/{pipeline,consumer,api}, src/shared
+apps/server/        NestJS; src/roles/{pipeline,consumer,api}, src/shared,
+                    src/database/{entities,migrations}
 apps/ui/            Vue 3 + Vite
 verify/             verify runner (container)
-db/                 schema + triggers (applied on startup)
 docs/DEVIATIONS.md  running log of spec deviations
 docker-compose.yml  Makefile  seed.sh  verify.sh
 SPEC.md  AGENTS.md  README.md
@@ -357,6 +377,8 @@ npm workspaces for `apps/*`.
 5. **Postgres for control, checkpoints, DLQ, consumer dedup** — durable, transactional, already present;
    no Redis in v1.
 6. **ES external versioning** resolves backfill/incremental races without locks.
+7. **TypeORM with hot-path rules** (§5.6) over raw `pg` (loses Nest-idiomatic structure and migrations)
+   and over "plain TypeORM" (`save()` in the consumer would reintroduce the dedup race).
 
 ## 14. Open questions
 
