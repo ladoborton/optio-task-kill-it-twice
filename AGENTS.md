@@ -34,6 +34,7 @@ apps/server/            NestJS, one codebase started in roles via ROLE=pipeline|
   src/roles/api/        REST for UI and verify: status, control, data, simulation
   src/shared/           config, logging, ES/RabbitMQ clients, backoff, circuit breaker
   src/database/         TypeORM data source, entities/, migrations/
+  src/tools/            one-shot roles: migrate, seed
 apps/ui/                Vue 3 + Vite, polling every 2 s
 verify/                 gate runner, runs in a container with the Docker socket mounted
 docker-compose.yml      whole system; `migrate` is a one-shot service the roles depend on

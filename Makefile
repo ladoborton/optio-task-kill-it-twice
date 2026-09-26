@@ -1,4 +1,4 @@
-.PHONY: up down verify logs
+.PHONY: up down seed verify logs
 
 up:
 	docker compose up -d --build
@@ -6,6 +6,11 @@ up:
 down:
 	docker compose down
 
+seed:
+	./seed.sh
+
+# make verify            all gates
+# make verify GATE=G1    one gate
 verify:
 	./verify.sh $(GATE)
 

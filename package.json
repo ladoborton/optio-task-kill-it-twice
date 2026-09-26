@@ -2,6 +2,7 @@
   "name": "optio-task-kill-it-twice",
   "private": true,
   "workspaces": [
+    "apps/server",
     "verify"
   ],
   "scripts": {

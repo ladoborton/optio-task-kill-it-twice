@@ -5,6 +5,7 @@ RUN apk add --no-cache docker-cli
 WORKDIR /repo
 COPY package.json package-lock.json ./
 COPY verify/package.json verify/
+COPY apps/server/package.json apps/server/
 RUN npm ci --workspace verify --include-workspace-root=false --no-audit --no-fund
 COPY verify/ verify/
 WORKDIR /repo/verify

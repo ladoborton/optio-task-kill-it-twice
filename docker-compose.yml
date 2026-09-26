@@ -10,7 +10,39 @@ x-verify-env: &verify-env
   COMPOSE_PROJECT: kill-it-twice
   SEED_COUNT: ${SEED_COUNT:-1000000}
 
+x-server: &server
+  build:
+    context: .
+    dockerfile: apps/server/Dockerfile
+  image: kill-it-twice/server
+
+x-server-env: &server-env
+  DATABASE_URL: postgres://optio:optio@postgres:5432/optio
+  ES_URL: http://elasticsearch:9200
+  SEED_COUNT: ${SEED_COUNT:-1000000}
+
 services:
+  # One-shot: applies migrations, then exits; roles depend on it (SPEC §5.1).
+  migrate:
+    <<: *server
+    environment:
+      <<: *server-env
+      ROLE: migrate
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  # One-shot: `./seed.sh` — 1M deterministic customers, resets pipeline state (SPEC §4.8).
+  seed:
+    <<: *server
+    profiles: [tools]
+    environment:
+      <<: *server-env
+      ROLE: seed
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      elasticsearch: { condition: service_healthy }
+
   postgres:
     image: postgres:16-alpine
     environment:
