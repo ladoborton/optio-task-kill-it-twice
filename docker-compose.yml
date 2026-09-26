@@ -1,0 +1,86 @@
+# Fixed project name: verify finds containers by the compose project label.
+name: kill-it-twice
+
+x-verify-env: &verify-env
+  DATABASE_URL: postgres://optio:optio@postgres:5432/optio
+  ES_URL: http://elasticsearch:9200
+  RABBITMQ_MGMT_URL: http://rabbitmq:15672
+  RABBITMQ_USER: optio
+  RABBITMQ_PASSWORD: optio
+  COMPOSE_PROJECT: kill-it-twice
+  SEED_COUNT: ${SEED_COUNT:-1000000}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: optio
+      POSTGRES_PASSWORD: optio
+      POSTGRES_DB: optio
+    # Larger WAL budget so the 1M-row seed doesn't spend its time checkpointing.
+    command: postgres -c shared_buffers=256MB -c max_wal_size=2GB
+    ports:
+      - "5433:5432" # 5433 on the host: avoids clashing with a local Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U optio -d optio"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      # Dev laptop: a nearly full disk must not flip indices to read-only mid-verify.
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+    mem_limit: 2g
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s' >/dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    # Stable hostname = stable node name = data survives container re-creation.
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: optio
+      RABBITMQ_DEFAULT_PASS: optio
+    ports:
+      - "5672:5672"
+      - "15672:15672" # management UI
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  # One-shot gate runner: `./verify.sh [preflight|G1..G5]` (SPEC §11).
+  verify:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: verify/Dockerfile
+    environment: *verify-env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  esdata:
+  rabbitdata:

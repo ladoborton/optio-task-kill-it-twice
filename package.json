@@ -1,0 +1,10 @@
+{
+  "name": "optio-task-kill-it-twice",
+  "private": true,
+  "workspaces": [
+    "verify"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
