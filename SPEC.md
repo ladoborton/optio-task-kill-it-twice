@@ -6,6 +6,7 @@
 |---------|------------|---------|
 | v1      | 2026-09-24 | Initial spec, written before any code. Decisions marked **(tentative)** and everything in §14 are expected to change once measured. |
 | v1.1    | 2026-09-24 | **Data access: TypeORM with hot-path rules (§5.6)** instead of the implied raw `pg`. Why: the first argument against an ORM (race in consumer dedup) was really about `repository.save()`, not TypeORM — QueryBuilder expresses the same atomic SQL. TypeORM gives the Nest-idiomatic structure (entities, migrations, DI) the team expects; the rules keep the critical SQL explicit. Added one-shot `migrate` service (§5.1) and single-gate verify runs (§11). |
+| v1.2    | 2026-09-28 | **Checkpoint writes are compare-and-set; seed stops the pipeline (§4.8, §6.2).** Why: v1 assumed the pipeline is the only writer of checkpoints — a reset during a batch would be overwritten and rows skipped (D-001). Also recorded: measured ES-only backfill ≈ 12k rec/s (1M in ~85 s), faster than the 2–5k estimate; volume stays 1M until the stream sink is added and re-measured. |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -135,6 +136,9 @@ Lets the API report "pipeline is dead" and last known throughput even while the 
   changes in v2 with the measurement as the reason.
 - Seed uses `generate_series` in SQL (seconds, not minutes) and **bypasses the outbox trigger**
   (`session_replication_role = replica`): initial data is the backfill's job, not the incremental's.
+- Seed resets checkpoints and deletes the index, so `seed.sh` **stops the pipeline first** and starts it
+  afterwards. Elasticsearch runs with `action.auto_create_index=false`: a write into a deleted index fails
+  instead of recreating it without the strict mapping; only the pipeline creates the index.
 
 ## 5. Architecture
 
@@ -248,6 +252,11 @@ read batch → ES _bulk → classify items → RabbitMQ publish + wait for confi
 **The checkpoint moves only when every record of the batch is either acknowledged by each sink or durably
 stored in `dlq_records` for that sink.** Crash anywhere before the checkpoint write ⇒ the batch is replayed
 ⇒ duplicates are absorbed by idempotency. Crash can never cause loss.
+
+The checkpoint write is **compare-and-set**: `UPDATE … SET position = :to WHERE position = :from`. If
+anything else moved the checkpoint during the batch (a reset, a second pipeline instance), the update
+touches no row, the batch is dropped and the loop re-reads the checkpoint. A blind write would restore
+the old position and skip rows.
 
 ### 6.3 Idempotency per sink
 
