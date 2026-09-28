@@ -52,7 +52,7 @@ Parts of this tree do not exist yet; create them in the slice that needs them, f
 | all gates | `./verify.sh` (or `make verify`) |
 | one gate | `./verify.sh G1` |
 | logs of a role | `docker compose logs -f pipeline` |
-| server typecheck / lint / unit tests | `npm run typecheck -w apps/server`, `npm run lint -w apps/server`, `npm test -w apps/server` |
+| typecheck (all workspaces) / server unit tests | `npm run typecheck`, `npm test -w apps/server` |
 
 The host has no `make` and no local Postgres/Node requirement is assumed for reviewers — everything
 that matters must work through Docker. `.sh` files must stay LF (enforced by `.gitattributes`).
@@ -121,7 +121,7 @@ Silently "improving" on the SPEC is itself a deviation and must be reported.
 
 ## 10. Before handing a slice over
 
-- [ ] `npm run typecheck`, `npm run lint`, unit tests pass for touched workspaces
+- [ ] `npm run typecheck` and unit tests pass (no linter is configured — strict TypeScript is the check)
 - [ ] `docker compose up -d --build` from a clean state works
 - [ ] `./verify.sh <gate>` for this slice shows PASS, and previously passing gates still pass
 - [ ] Every new decision point has a `SPEC §…` comment or a DEVIATIONS entry

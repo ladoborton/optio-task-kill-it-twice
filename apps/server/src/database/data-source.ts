@@ -1,4 +1,4 @@
-import { DataSource } from 'typeorm';
+import { DataSource, DataSourceOptions } from 'typeorm';
 import { config } from '../shared/config';
 import { Customer } from './entities/customer.entity';
 import { CustomerChange } from './entities/customer-change.entity';
@@ -9,7 +9,8 @@ import { PipelineHeartbeat } from './entities/pipeline-heartbeat.entity';
 import { InitialSchema1727164800000 } from './migrations/1727164800000-initial-schema';
 
 // Migrations are listed explicitly (no glob), so the same code works from ts and compiled js.
-export const dataSource = new DataSource({
+// The options are shared by the one-shot tools (plain DataSource) and the Nest roles (TypeOrmModule).
+export const dataSourceOptions: DataSourceOptions = {
   type: 'postgres',
   url: config.databaseUrl,
   entities: [Customer, CustomerChange, DlqRecord, PipelineCheckpoint, PipelineControl, PipelineHeartbeat],
@@ -18,4 +19,6 @@ export const dataSource = new DataSource({
   synchronize: false,
   migrationsRun: false,
   logging: ['error'],
-});
+};
+
+export const dataSource = new DataSource(dataSourceOptions);

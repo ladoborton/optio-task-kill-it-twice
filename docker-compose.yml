@@ -32,6 +32,23 @@ services:
       postgres: { condition: service_healthy }
     restart: "no"
 
+  # Backfill (+ incremental from S4). The service verify kills (SPEC §5.1).
+  pipeline:
+    <<: *server
+    environment:
+      <<: *server-env
+      ROLE: pipeline
+      # Heap below the container limit, so V8 collects before the kernel OOM-kills.
+      NODE_OPTIONS: --max-old-space-size=192
+    # SPEC §4.8: loading the whole table would need ~1 GB — with 256 MB it crashes instead.
+    mem_limit: 256m
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      elasticsearch: { condition: service_healthy }
+    # No automatic restart: verify plays the orchestrator and restarts it explicitly (G1),
+    # so "resumed from" is measured against a checkpoint that cannot move in between.
+    restart: "no"
+
   # One-shot: `./seed.sh` — 1M deterministic customers, resets pipeline state (SPEC §4.8).
   seed:
     <<: *server
@@ -68,6 +85,9 @@ services:
       xpack.security.enabled: "false"
       # Dev laptop: a nearly full disk must not flip indices to read-only mid-verify.
       cluster.routing.allocation.disk.threshold_enabled: "false"
+      # A write to a deleted index must fail, not silently recreate it without the strict
+      # mapping (SPEC §4.5). Only the pipeline creates the index, with its mapping.
+      action.auto_create_index: "false"
       ES_JAVA_OPTS: -Xms1g -Xmx1g
     mem_limit: 2g
     ports:

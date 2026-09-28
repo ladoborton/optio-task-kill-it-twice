@@ -19,6 +19,11 @@ export const config = {
   databaseUrl: required('DATABASE_URL'),
   esUrl: process.env.ES_URL ?? 'http://elasticsearch:9200',
   esIndex: process.env.ES_INDEX ?? 'customers',
+  // A bulk of 500 docs normally takes well under a second; a hung sink must not hang the loop.
+  esRequestTimeoutMs: int('ES_REQUEST_TIMEOUT_MS', 30_000),
+  // SPEC §7.2: retry delays grow 0.5 s → 1 → 2 → 4 … up to 30 s.
+  retryBaseMs: int('RETRY_BASE_MS', 500),
+  retryMaxMs: int('RETRY_MAX_MS', 30_000),
   // SPEC §4.8: 1M rows by default.
   seedCount: int('SEED_COUNT', 1_000_000),
   // Rows per INSERT statement during seed; keeps each statement (and its WAL) bounded.
