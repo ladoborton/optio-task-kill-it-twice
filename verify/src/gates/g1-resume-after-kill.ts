@@ -1,16 +1,9 @@
 import { Check, fail, pass } from '../types';
-import { db, scalar } from '../lib/db';
+import { scalar } from '../lib/db';
 import { jsonLogsSince, kill, start, stop } from '../lib/docker';
 import { countDocs, deleteIndex } from '../lib/es';
+import { backfillCompleted, backfillPosition, fmt, MIN, resetBackfill } from '../lib/state';
 import { sleep, waitFor } from '../lib/wait';
-
-const MIN = 60_000;
-const fmt = (n: number) => n.toLocaleString('en-US');
-
-const backfillPosition = async () =>
-  Number(await scalar<string>(`SELECT position FROM pipeline_checkpoints WHERE stream = 'backfill'`));
-const backfillCompleted = async () =>
-  (await scalar<string | null>(`SELECT completed_at FROM pipeline_checkpoints WHERE stream = 'backfill'`)) !== null;
 
 // SPEC §11 G1: docker kill mid-backfill; after restart it continues from the checkpoint —
 // neither from zero nor past it — and every source row ends up in the index.
@@ -25,8 +18,7 @@ export const g1: Check = {
     // 1. Known starting state: backfill from zero into an empty index. Without an empty index,
     //    "all rows are in the index" would pass even if the restarted pipeline did nothing.
     await stop('pipeline');
-    await db.query(`UPDATE pipeline_checkpoints SET position = 0, completed_at = NULL, updated_at = now() WHERE stream = 'backfill'`);
-    await db.query(`UPDATE pipeline_control SET backfill_state = 'running', updated_at = now()`);
+    await resetBackfill();
     await deleteIndex();
     await start('pipeline');
     steps.push(`reset: checkpoint 0, empty index, ${fmt(sourceRows)} source rows`);
