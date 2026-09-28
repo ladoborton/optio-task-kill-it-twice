@@ -41,4 +41,22 @@ Kinds:
   2. `seed.sh` stops the pipeline before seeding and starts it afterwards.
   3. Elasticsearch runs with `action.auto_create_index=false`; only the pipeline creates the index.
   Recorded in SPEC v1.2 (§4.8, §6.2).
+  Extended in S3: the consumer's projection and dedup record hold versions just like the index, so
+  seed also truncates `consumer.*`, purges the queue, and `seed.sh` stops the consumer too.
+- Decision or accident?: decision.
+
+### D-002 — The consumer applies events in batches, not one by one
+- Date / slice: 2026-09-28 / S3
+- Kind: spec
+- SPEC said: §6.3 "in one Postgres transaction it inserts into `consumer_applied` … updates
+  `consumer_customers` … then acks" — written as if per message.
+- What happened: the agent noticed before implementing that one commit per message means ~1M commits for a
+  backfill (≈ 15–30 min at ~1 ms per commit on Docker Desktop), which would make G2 impractically slow.
+- Why it was wrong / insufficient: the SPEC described the atomicity rule but not its granularity.
+- Resolution: messages are grouped (up to 500, or whatever arrived within 50 ms) and each group is applied in
+  one transaction — `INSERT … ON CONFLICT DO NOTHING RETURNING` for dedup, one version-guarded upsert, one
+  counter update — then acknowledged with a single `ack(last, multiple=true)`. The guarantee is unchanged:
+  nothing is acked before its transaction commits. Measured: the consumer keeps pace with the pipeline
+  (~7k events/s). Table names also differ from the SPEC sketch: `consumer.applied_events`,
+  `consumer.customers`, `consumer.stats` (schema `consumer`).
 - Decision or accident?: decision.

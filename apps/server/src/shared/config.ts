@@ -21,6 +21,17 @@ export const config = {
   esIndex: process.env.ES_INDEX ?? 'customers',
   // A bulk of 500 docs normally takes well under a second; a hung sink must not hang the loop.
   esRequestTimeoutMs: int('ES_REQUEST_TIMEOUT_MS', 30_000),
+  rabbitmqUrl: process.env.RABBITMQ_URL ?? 'amqp://optio:optio@rabbitmq:5672',
+  // Publisher confirms for one batch; a broker that never answers must not hang the loop.
+  streamConfirmTimeoutMs: int('STREAM_CONFIRM_TIMEOUT_MS', 30_000),
+  // SPEC §7.3: after this many redeliveries (e.g. a message that crashes the consumer every time)
+  // the queue dead-letters the message instead of looping forever.
+  deliveryLimit: int('DELIVERY_LIMIT', 5),
+  // Consumer: unacked messages in flight, and how many are applied per Postgres transaction.
+  consumerPrefetch: int('CONSUMER_PREFETCH', 1_000),
+  consumerBatchSize: int('CONSUMER_BATCH_SIZE', 500),
+  // Flush a partial batch after this long, so a quiet stream is not held back waiting for 500.
+  consumerFlushMs: int('CONSUMER_FLUSH_MS', 50),
   // SPEC §7.2: retry delays grow 0.5 s → 1 → 2 → 4 … up to 30 s.
   retryBaseMs: int('RETRY_BASE_MS', 500),
   retryMaxMs: int('RETRY_MAX_MS', 30_000),

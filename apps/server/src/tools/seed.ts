@@ -1,6 +1,8 @@
+import { connect } from 'amqplib';
 import { dataSource } from '../database/data-source';
 import { config } from '../shared/config';
 import { log } from '../shared/logger';
+import { assertTopology, QUEUE } from '../shared/rabbitmq/topology';
 
 const INSERT_CHUNK = `
   INSERT INTO customers (id, email, name, city, segment, balance, attributes, version, updated_at)
@@ -43,6 +45,10 @@ export async function seed(): Promise<void> {
     // Explicit ids were inserted, so move the identity sequence past them for later inserts.
     await qr.query(`SELECT setval(pg_get_serial_sequence('customers', 'id'), $1)`, [config.seedCount]);
     await qr.query(`UPDATE pipeline_checkpoints SET position = 0, completed_at = NULL, updated_at = now()`);
+    // Same reason as the index below: the consumer's projection and dedup record hold versions of
+    // the old data and would treat the new version-1 events as stale duplicates.
+    await qr.query(`TRUNCATE consumer.customers, consumer.applied_events`);
+    await qr.query(`UPDATE consumer.stats SET applied = 0, duplicates = 0`);
     await qr.query(`ANALYZE customers`);
   } finally {
     await qr.release();
@@ -50,6 +56,7 @@ export async function seed(): Promise<void> {
   }
 
   await deleteIndex();
+  await purgeQueue();
   log('seed.done', { rows: config.seedCount, seconds: Math.round((Date.now() - started) / 1000) });
 }
 
@@ -59,4 +66,17 @@ async function deleteIndex(): Promise<void> {
   const res = await fetch(`${config.esUrl}/${config.esIndex}`, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) throw new Error(`DELETE index -> HTTP ${res.status}`);
   log('seed.index_deleted', { index: config.esIndex, existed: res.ok });
+}
+
+// Messages about the old data still queued would be applied on top of the fresh projection.
+async function purgeQueue(): Promise<void> {
+  const connection = await connect(config.rabbitmqUrl);
+  try {
+    const channel = await connection.createChannel();
+    await assertTopology(channel);
+    const { messageCount } = await channel.purgeQueue(QUEUE);
+    log('seed.queue_purged', { queue: QUEUE, messages: messageCount });
+  } finally {
+    await connection.close();
+  }
 }

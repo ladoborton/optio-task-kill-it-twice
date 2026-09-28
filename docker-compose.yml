@@ -19,6 +19,7 @@ x-server: &server
 x-server-env: &server-env
   DATABASE_URL: postgres://optio:optio@postgres:5432/optio
   ES_URL: http://elasticsearch:9200
+  RABBITMQ_URL: amqp://optio:optio@rabbitmq:5672
   SEED_COUNT: ${SEED_COUNT:-1000000}
 
 services:
@@ -45,8 +46,20 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       elasticsearch: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
     # No automatic restart: verify plays the orchestrator and restarts it explicitly (G1),
     # so "resumed from" is measured against a checkpoint that cannot move in between.
+    restart: "no"
+
+  # Independent stream consumer with its own projection (SPEC §5.1, §6.3). Killed by G2.
+  consumer:
+    <<: *server
+    environment:
+      <<: *server-env
+      ROLE: consumer
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
     restart: "no"
 
   # One-shot: `./seed.sh` — 1M deterministic customers, resets pipeline state (SPEC §4.8).
@@ -59,6 +72,7 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
       elasticsearch: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
 
   postgres:
     image: postgres:16-alpine

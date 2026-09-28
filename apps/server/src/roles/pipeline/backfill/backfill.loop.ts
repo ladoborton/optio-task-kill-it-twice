@@ -8,6 +8,7 @@ import { ControlRepository } from '../control/control.repository';
 import { CustomerIndex } from '../es/customer-index';
 import { EsSink, IndexMissingError } from '../es/es.sink';
 import { CustomerSource } from '../source/customer-source';
+import { StreamSink } from '../stream/stream.sink';
 
 const STREAM = 'backfill';
 
@@ -32,6 +33,7 @@ export class BackfillLoop implements OnApplicationBootstrap, BeforeApplicationSh
     private readonly source: CustomerSource,
     private readonly index: CustomerIndex,
     private readonly es: EsSink,
+    private readonly stream: StreamSink,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -113,8 +115,9 @@ export class BackfillLoop implements OnApplicationBootstrap, BeforeApplicationSh
     const startedAt = Date.now();
 
     const result = await this.es.write(rows);
+    const published = await this.stream.publish(rows, STREAM);
 
-    // SPEC §6.2: the checkpoint moves only after the sink acknowledged every record of the batch.
+    // SPEC §6.2: the checkpoint moves only after BOTH sinks acknowledged every record of the batch.
     // A crash before this line means the batch is written again after restart — never skipped.
     await this.checkpoints.advance(STREAM, from, to);
 
@@ -126,6 +129,7 @@ export class BackfillLoop implements OnApplicationBootstrap, BeforeApplicationSh
       count: rows.length,
       written: result.written,
       conflicts: result.conflicts,
+      published,
       ms: Date.now() - startedAt,
     });
     return 0;
