@@ -41,6 +41,8 @@ export const config = {
   apiPort: int('API_PORT', 3000),
   healthDownAfterMs: int('HEALTH_DOWN_AFTER_MS', 10_000),
   healthMaxLagSeconds: int('HEALTH_MAX_LAG_SECONDS', 30),
+  // Simulation: only containers of this compose project can be stopped/started from the api.
+  composeProject: process.env.COMPOSE_PROJECT ?? 'kill-it-twice',
   rabbitMgmtUrl: process.env.RABBITMQ_MGMT_URL ?? 'http://rabbitmq:15672',
   rabbitUser: process.env.RABBITMQ_USER ?? 'optio',
   rabbitPassword: process.env.RABBITMQ_PASSWORD ?? 'optio',

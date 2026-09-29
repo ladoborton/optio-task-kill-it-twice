@@ -61,11 +61,26 @@ services:
     environment:
       <<: *server-env
       ROLE: api
+      COMPOSE_PROJECT: kill-it-twice
     ports:
       - "3000:3000"
+    volumes:
+      # Simulation (stop/start/kill sinks from the UI). DEV ONLY — see SPEC §9.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       migrate: { condition: service_completed_successfully }
       rabbitmq: { condition: service_healthy }
+    restart: unless-stopped
+
+  # SPEC §10: Vue UI served by nginx, which proxies /api to the api service.
+  ui:
+    build:
+      context: .
+      dockerfile: apps/ui/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
     restart: unless-stopped
 
   # Independent stream consumer with its own projection (SPEC §5.1, §6.3). Killed by G2.

@@ -136,3 +136,20 @@ Kinds:
   Also found by G5: labelled Prometheus series did not exist until the first batch after a restart; they
   are now initialised to 0.
 - Decision or accident?: decision.
+
+### D-007 — Simulation and UI details
+- Date / slice: 2026-09-30 / S8
+- Kind: spec
+- SPEC said: §9 `POST /api/sim/sinks/:name/{stop|start}`; §10 UI talks to the api.
+- What happened / resolution:
+  - Simulation is `POST /api/sim/services/:service/{stop|start|kill}` for elasticsearch, rabbitmq, **pipeline
+    and consumer** — the UI can reproduce G1 (kill the pipeline) and G2 (kill the consumer), not only sink
+    outages. `kill` is SIGKILL; `stop` is graceful. Allowed services are whitelisted; the api never stops
+    itself or the databases.
+  - The UI container is nginx serving the built Vue app and proxying `/api` to the api service: one origin,
+    no CORS, no api host baked into the bundle.
+  - Records detail shows the source row, the index document and the consumer projection side by side; the
+    projection intentionally stores only id/version/deleted/email/city/segment, so e.g. balance shows "—".
+  - The UI has no way to edit source data: the source is the client's system. Fixing a bad record before a
+    replay is done in Postgres (as a client would), then "Replay" in the UI.
+- Decision or accident?: decision.

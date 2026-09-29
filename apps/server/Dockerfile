@@ -4,6 +4,7 @@ WORKDIR /repo
 COPY package.json package-lock.json ./
 COPY apps/server/package.json apps/server/
 COPY verify/package.json verify/
+COPY apps/ui/package.json apps/ui/
 RUN npm ci --workspace apps/server --include-workspace-root=false --no-audit --no-fund
 COPY apps/server/ apps/server/
 RUN npm run build --workspace apps/server
@@ -13,6 +14,7 @@ WORKDIR /repo
 COPY package.json package-lock.json ./
 COPY apps/server/package.json apps/server/
 COPY verify/package.json verify/
+COPY apps/ui/package.json apps/ui/
 RUN npm ci --workspace apps/server --include-workspace-root=false --omit=dev --no-audit --no-fund
 COPY --from=build /repo/apps/server/dist apps/server/dist
 WORKDIR /repo/apps/server
