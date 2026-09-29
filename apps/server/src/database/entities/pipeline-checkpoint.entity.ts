@@ -12,6 +12,10 @@ export class PipelineCheckpoint {
   @Column('bigint')
   position: string;
 
+  /** Incremental only: txid half of the (txid, seq) position; 0 for backfill. */
+  @Column('bigint', { name: 'position_txid' })
+  positionTxid: string;
+
   @Column('timestamptz', { name: 'completed_at', nullable: true })
   completedAt: Date | null;
 

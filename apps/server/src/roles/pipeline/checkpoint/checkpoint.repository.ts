@@ -1,9 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { PipelineCheckpoint, StreamName } from '../../../database/entities/pipeline-checkpoint.entity';
+import { OutboxPosition } from '../source/outbox-reader';
 
 export interface Checkpoint {
   position: string;
+  /** Incremental only (see OutboxPosition); '0' for backfill. */
+  positionTxid: string;
   completedAt: Date | null;
 }
 
@@ -20,10 +23,10 @@ export class CheckpointRepository {
 
   async get(stream: StreamName): Promise<Checkpoint> {
     const [row] = await this.db.query(
-      `SELECT position, completed_at FROM pipeline_checkpoints WHERE stream = $1`,
+      `SELECT position, position_txid, completed_at FROM pipeline_checkpoints WHERE stream = $1`,
       [stream],
     );
-    return { position: row.position, completedAt: row.completed_at };
+    return { position: row.position, positionTxid: row.position_txid, completedAt: row.completed_at };
   }
 
   /**
@@ -40,6 +43,17 @@ export class CheckpointRepository {
       .where('stream = :stream AND position = :from AND completed_at IS NULL', { stream, from })
       .execute();
     if (res.affected !== 1) throw new CheckpointMovedError(stream, from);
+  }
+
+  /** Same contract as advance(), for the (txid, seq) position of the incremental stream. */
+  async advanceIncremental(from: OutboxPosition, to: OutboxPosition): Promise<void> {
+    const res = await this.db
+      .createQueryBuilder()
+      .update(PipelineCheckpoint)
+      .set({ positionTxid: to.txid, position: to.seq, updatedAt: () => 'now()' })
+      .where(`stream = 'incremental' AND position_txid = :txid AND position = :seq`, { txid: from.txid, seq: from.seq })
+      .execute();
+    if (res.affected !== 1) throw new CheckpointMovedError('incremental', `${from.txid}/${from.seq}`);
   }
 
   async complete(stream: StreamName, at: string): Promise<void> {

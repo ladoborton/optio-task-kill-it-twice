@@ -18,6 +18,11 @@ test('a document the mapping rejects is permanent', () => {
   assert.equal(classifyItem({ status: 400, error: { type: 'strict_dynamic_mapping_exception' } }), 'permanent');
 });
 
+test('deleting a document that is not there is "absent", not a failure', () => {
+  assert.equal(classifyItem({ status: 404, result: 'not_found' }), 'absent');
+  assert.equal(classifyItem({ status: 200, result: 'deleted' }), 'written');
+});
+
 test('missing index is its own outcome', () => {
   assert.equal(classifyItem({ status: 404, error: { type: 'index_not_found_exception' } }), 'index_missing');
 });
@@ -30,6 +35,7 @@ test('summarize keeps batch positions of failed items', () => {
     { status: 201 },
   ]);
   assert.equal(s.written, 2);
+  assert.equal(s.absent, 0);
   assert.equal(s.conflicts, 1);
   assert.deepEqual(s.failed, [
     { position: 1, outcome: 'permanent', status: 400, type: 'mapper_parsing_exception', reason: 'bad age' },

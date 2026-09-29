@@ -60,3 +60,22 @@ Kinds:
   (~7k events/s). Table names also differ from the SPEC sketch: `consumer.applied_events`,
   `consumer.customers`, `consumer.stats` (schema `consumer`).
 - Decision or accident?: decision.
+
+### D-003 — The SPEC's outbox gap rule would lose changes
+- Date / slice: 2026-09-28 / S4
+- Kind: spec
+- SPEC said: §5.4 "only consume up to the first gap; if a gap persists longer than 5 s, treat it as a
+  rolled-back transaction and skip it" (flagged as open question §14.1).
+- What happened: before implementing, the agent showed that a gap is not only a rollback — it is also a
+  transaction that took its `seq` early and has not committed yet. A transaction open longer than 5 s
+  would be skipped and its change lost for good. Reproduced by hand: with transaction A (seq 180723)
+  still open and B (seq 180724) committed, a `seq > N` reader returns only 180724.
+- Why it was wrong / insufficient: `seq` order is allocation order, not commit order; no timeout can
+  tell "rolled back" from "slow".
+- Resolution (chosen by the human over keeping v1): the outbox records the writing transaction's id
+  (`txid`, migration `OutboxTxid1727500000000`); the incremental loop reads only rows with
+  `txid < pg_snapshot_xmin(pg_current_snapshot())` — i.e. of finished transactions — in `(txid, seq)`
+  order, and the checkpoint is the pair `(position_txid, position)`. A long transaction now delays the
+  loop (lag grows) instead of losing data. G2 was extended with an 8-second transaction on an
+  already-backfilled customer, so only the incremental loop can deliver it. SPEC v1.3.
+- Decision or accident?: decision.

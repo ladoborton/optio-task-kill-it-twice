@@ -44,7 +44,7 @@ export async function seed(): Promise<void> {
     await qr.query(`SET session_replication_role = origin`);
     // Explicit ids were inserted, so move the identity sequence past them for later inserts.
     await qr.query(`SELECT setval(pg_get_serial_sequence('customers', 'id'), $1)`, [config.seedCount]);
-    await qr.query(`UPDATE pipeline_checkpoints SET position = 0, completed_at = NULL, updated_at = now()`);
+    await qr.query(`UPDATE pipeline_checkpoints SET position = 0, position_txid = 0, completed_at = NULL, updated_at = now()`);
     // Same reason as the index below: the consumer's projection and dedup record hold versions of
     // the old data and would treat the new version-1 events as stale duplicates.
     await qr.query(`TRUNCATE consumer.customers, consumer.applied_events`);

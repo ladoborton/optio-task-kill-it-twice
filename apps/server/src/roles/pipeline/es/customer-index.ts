@@ -47,8 +47,21 @@ export function toDocument(row: CustomerRow) {
 @Injectable()
 export class CustomerIndex {
   readonly name = config.esIndex;
+  private ready = false;
 
   constructor(@Inject(ES_CLIENT) private readonly es: Client) {}
+
+  /** ensure() once per process, again after invalidate(). */
+  async ensureReady(): Promise<void> {
+    if (this.ready) return;
+    await this.ensure();
+    this.ready = true;
+  }
+
+  /** The index turned out to be missing (deleted by seed/verify): recreate it on next use. */
+  invalidate(): void {
+    this.ready = false;
+  }
 
   /** Creates the index with its strict mapping if it doesn't exist. Safe to call concurrently. */
   async ensure(): Promise<void> {
@@ -56,8 +69,15 @@ export class CustomerIndex {
     try {
       await this.es.indices.create({
         index: this.name,
-        // Single-node dev cluster: replicas could never be assigned and would keep health yellow.
-        settings: { number_of_shards: 1, number_of_replicas: 0 },
+        settings: {
+          // Single-node dev cluster: replicas could never be assigned and would keep health yellow.
+          number_of_shards: 1,
+          number_of_replicas: 0,
+          // A delete leaves a versioned tombstone; only while it exists is a late, older upsert
+          // (a backfill page read before the delete, a retried batch) rejected. The default 60 s
+          // is shorter than a long backoff; keep tombstones for an hour.
+          'index.gc_deletes': '1h',
+        },
         mappings: MAPPINGS,
       });
       log('es.index_created', { index: this.name });

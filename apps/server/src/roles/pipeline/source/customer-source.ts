@@ -31,4 +31,14 @@ export class CustomerSource {
       [afterId, limit],
     );
   }
+
+  /** Current rows for the given ids; ids of deleted customers are simply absent from the result. */
+  readByIds(ids: string[]): Promise<CustomerRow[]> {
+    return this.db.query(
+      `SELECT id, email, name, city, segment, balance, attributes, version, updated_at
+         FROM customers
+        WHERE id = ANY($1::bigint[])`,
+      [ids],
+    );
+  }
 }

@@ -4,8 +4,8 @@ import { config } from '../../../shared/config';
 import { log } from '../../../shared/logger';
 import { CustomerEvent } from '../../../shared/rabbitmq/customer-event';
 import { assertTopology, EXCHANGE, routingKey } from '../../../shared/rabbitmq/topology';
+import { Change } from '../changes/change';
 import { toDocument } from '../es/customer-index';
-import { CustomerRow } from '../source/customer-source';
 
 type Connection = Awaited<ReturnType<typeof connect>>;
 
@@ -19,19 +19,19 @@ export class StreamSink implements OnApplicationShutdown {
   private connection?: Connection;
   private channel?: ConfirmChannel;
 
-  async publish(rows: CustomerRow[], source: CustomerEvent['source']): Promise<number> {
+  async publish(changes: Change[], source: CustomerEvent['source']): Promise<number> {
     const ch = await this.confirmChannel();
     const emittedAt = new Date().toISOString();
-    for (const row of rows) {
+    for (const change of changes) {
       const event: CustomerEvent = {
-        customer_id: Number(row.id),
-        version: Number(row.version),
-        op: 'upsert',
+        customer_id: Number(change.id),
+        version: Number(change.version),
+        op: change.op,
         source,
-        data: toDocument(row),
+        data: change.op === 'upsert' ? toDocument(change.row) : null,
         emitted_at: emittedAt,
       };
-      ch.publish(EXCHANGE, routingKey('upsert'), Buffer.from(JSON.stringify(event)), {
+      ch.publish(EXCHANGE, routingKey(change.op), Buffer.from(JSON.stringify(event)), {
         persistent: true, // written to disk, survives a broker restart
         contentType: 'application/json',
         // Same id on every replay of this (customer, version): consumers can dedup on it.
@@ -46,7 +46,7 @@ export class StreamSink implements OnApplicationShutdown {
       this.reset();
       throw e;
     }
-    return rows.length;
+    return changes.length;
   }
 
   async onApplicationShutdown(): Promise<void> {

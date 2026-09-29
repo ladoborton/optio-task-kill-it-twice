@@ -8,6 +8,10 @@ export class CustomerChange {
   @PrimaryGeneratedColumn({ type: 'bigint' })
   seq: string;
 
+  /** Writing transaction's id (set by column default); read order is (txid, seq). */
+  @Column('bigint')
+  txid: string;
+
   @Column('bigint', { name: 'customer_id' })
   customerId: string;
 
