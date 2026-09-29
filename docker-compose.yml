@@ -49,9 +49,24 @@ services:
       migrate: { condition: service_completed_successfully }
       elasticsearch: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
+    ports:
+      - "9100:9100" # /metrics (Prometheus)
     # No automatic restart: verify plays the orchestrator and restarts it explicitly (G1),
     # so "resumed from" is measured against a checkpoint that cannot move in between.
     restart: "no"
+
+  # HTTP for the UI and verify: status, data, control, simulation (SPEC §9).
+  api:
+    <<: *server
+    environment:
+      <<: *server-env
+      ROLE: api
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    restart: unless-stopped
 
   # Independent stream consumer with its own projection (SPEC §5.1, §6.3). Killed by G2.
   consumer:

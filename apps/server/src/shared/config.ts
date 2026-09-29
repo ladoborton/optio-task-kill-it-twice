@@ -35,6 +35,15 @@ export const config = {
   // SPEC §7.4: DLQ replay requests handled per step, and how often to look for new ones.
   dlqReplayBatch: int('DLQ_REPLAY_BATCH', 100),
   dlqReplayPollMs: int('DLQ_REPLAY_POLL_MS', 1_000),
+  // SPEC §8: pipeline /metrics port, heartbeat period, api port and health thresholds.
+  metricsPort: int('METRICS_PORT', 9100),
+  heartbeatMs: int('HEARTBEAT_MS', 2_000),
+  apiPort: int('API_PORT', 3000),
+  healthDownAfterMs: int('HEALTH_DOWN_AFTER_MS', 10_000),
+  healthMaxLagSeconds: int('HEALTH_MAX_LAG_SECONDS', 30),
+  rabbitMgmtUrl: process.env.RABBITMQ_MGMT_URL ?? 'http://rabbitmq:15672',
+  rabbitUser: process.env.RABBITMQ_USER ?? 'optio',
+  rabbitPassword: process.env.RABBITMQ_PASSWORD ?? 'optio',
   // SPEC §7.2: retry delays grow 0.5 s → 1 → 2 → 4 → 5 s. The cap is short on purpose (D-005): a
   // down sink is protected by its circuit breaker, not by loops sleeping for long.
   retryBaseMs: int('RETRY_BASE_MS', 500),

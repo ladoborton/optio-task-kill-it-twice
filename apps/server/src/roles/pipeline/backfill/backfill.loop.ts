@@ -4,6 +4,7 @@ import { upsert } from '../changes/change';
 import { CheckpointRepository } from '../checkpoint/checkpoint.repository';
 import { ControlRepository } from '../control/control.repository';
 import { BatchDelivery } from '../delivery/batch-delivery';
+import { PipelineMetrics } from '../metrics/pipeline-metrics';
 import { CustomerSource } from '../source/customer-source';
 import { StepLoop } from '../step-loop';
 
@@ -19,6 +20,7 @@ export class BackfillLoop extends StepLoop {
     private readonly checkpoints: CheckpointRepository,
     private readonly source: CustomerSource,
     private readonly delivery: BatchDelivery,
+    private readonly metrics: PipelineMetrics,
   ) {
     super();
   }
@@ -63,15 +65,9 @@ export class BackfillLoop extends StepLoop {
     // restart — never skipped.
     await this.checkpoints.advance(this.stream, from, to);
 
-    log('backfill.batch', {
-      stream: this.stream,
-      batch_id: batchId,
-      from: Number(from),
-      to: Number(to),
-      count: rows.length,
-      ...result,
-      ms: Date.now() - startedAt,
-    });
+    const ms = Date.now() - startedAt;
+    this.metrics.recordBatch(this.stream, rows.length, ms, result);
+    log('backfill.batch', { stream: this.stream, batch_id: batchId, from: Number(from), to: Number(to), count: rows.length, ...result, ms });
     return 0;
   }
 }

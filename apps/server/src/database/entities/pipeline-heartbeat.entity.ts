@@ -17,4 +17,8 @@ export class PipelineHeartbeat {
 
   @Column('double precision', { name: 'incremental_rate' })
   incrementalRate: number;
+
+  /** { circuits: { elasticsearch: 'closed' | 'open' | 'half_open', rabbitmq: … } } */
+  @Column('jsonb')
+  details: Record<string, unknown>;
 }

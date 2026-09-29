@@ -3,6 +3,7 @@ import { config } from '../../../shared/config';
 import { log } from '../../../shared/logger';
 import { upsert } from '../changes/change';
 import { EsSink } from '../es/es.sink';
+import { PipelineMetrics } from '../metrics/pipeline-metrics';
 import { CustomerSource } from '../source/customer-source';
 import { StepLoop } from '../step-loop';
 import { DlqRepository } from './dlq.repository';
@@ -24,6 +25,7 @@ export class DlqReplayLoop extends StepLoop {
     private readonly dlq: DlqRepository,
     private readonly source: CustomerSource,
     private readonly es: EsSink,
+    private readonly metrics: PipelineMetrics,
   ) {
     super();
   }
@@ -49,6 +51,7 @@ export class DlqReplayLoop extends StepLoop {
     }
     await this.dlq.markReplayed(replayed);
 
+    this.metrics.recordBatch(this.stream, requests.length, 0);
     log('dlq_replay.batch', {
       stream: this.stream,
       requests: requests.length,

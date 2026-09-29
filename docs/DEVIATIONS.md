@@ -119,3 +119,20 @@ Kinds:
   the breaker: 0.6–3.7 s to resume, 19–21 s to drain a one-minute backlog. SPEC v1.5.
 - Decision or accident?: timings — decision; the 89 s claim — an agent mistake, caught by measuring
   again before committing.
+
+### D-006 — /api/status reads only durable state
+- Date / slice: 2026-09-30 / S7
+- Kind: spec
+- SPEC said: §8.2 status is "built from durable facts in Postgres … plus live pipeline metrics when
+  reachable"; §4.7 heartbeat columns without breaker state.
+- What happened: scraping the pipeline from the api would make the status depend on the process whose
+  death it must report, and duplicate the "where are we" logic in two places.
+- Resolution: the heartbeat also stores each sink's breaker state (`pipeline_heartbeat.details`, new
+  migration); throughput comes from the heartbeat's rates. `/api/status` reads Postgres + the RabbitMQ
+  management API only. One SQL (`readPipelineFacts`) defines position/lag/DLQ for both the heartbeat's
+  gauges and the api. While the pipeline is dead, breaker states are reported as `unknown` and health is
+  `down`. The consumer's RabbitMQ dead-letter queue is shown but does not degrade health (the SPEC's
+  health rules name only `dlq_records`).
+  Also found by G5: labelled Prometheus series did not exist until the first batch after a restart; they
+  are now initialised to 0.
+- Decision or accident?: decision.

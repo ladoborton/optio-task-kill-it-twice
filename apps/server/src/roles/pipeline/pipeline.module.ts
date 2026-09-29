@@ -12,6 +12,8 @@ import { BatchDelivery } from './delivery/batch-delivery';
 import { DlqReplayLoop } from './dlq/dlq-replay.loop';
 import { DlqRepository } from './dlq/dlq.repository';
 import { IncrementalLoop } from './incremental/incremental.loop';
+import { HeartbeatService } from './metrics/heartbeat.service';
+import { PipelineMetrics } from './metrics/pipeline-metrics';
 import { CustomerSource } from './source/customer-source';
 import { OutboxReader } from './source/outbox-reader';
 import { StreamSink } from './stream/stream.sink';
@@ -21,6 +23,8 @@ import { StreamSink } from './stream/stream.sink';
   providers: [
     esClientProvider,
     ...breakerProviders,
+    PipelineMetrics,
+    HeartbeatService,
     CustomerIndex,
     EsSink,
     StreamSink,

@@ -4,6 +4,7 @@ import { planChanges } from '../changes/change';
 import { CheckpointRepository } from '../checkpoint/checkpoint.repository';
 import { ControlRepository } from '../control/control.repository';
 import { BatchDelivery } from '../delivery/batch-delivery';
+import { PipelineMetrics } from '../metrics/pipeline-metrics';
 import { CustomerSource } from '../source/customer-source';
 import { OutboxReader } from '../source/outbox-reader';
 import { StepLoop } from '../step-loop';
@@ -25,6 +26,7 @@ export class IncrementalLoop extends StepLoop {
     private readonly outbox: OutboxReader,
     private readonly source: CustomerSource,
     private readonly delivery: BatchDelivery,
+    private readonly metrics: PipelineMetrics,
   ) {
     super();
   }
@@ -66,6 +68,7 @@ export class IncrementalLoop extends StepLoop {
     // or were skipped (delete shipped by a later page).
     await this.checkpoints.advanceIncremental(from, to);
 
+    this.metrics.recordBatch(this.stream, changes.length, Date.now() - startedAt, result);
     log('incremental.batch', {
       stream: this.stream,
       batch_id: batchId,
