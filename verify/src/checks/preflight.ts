@@ -56,9 +56,20 @@ const steps: Step[] = [
   {
     name: `seeded (ids 1..${env.seedCount.toLocaleString('en-US')})`,
     run: async () => {
-      const n = Number(await scalar<string>('SELECT count(*) FROM customers WHERE id <= $1', [env.seedCount]));
-      if (n !== env.seedCount) throw new Error(`found ${n.toLocaleString('en-US')}`);
-      return `${n.toLocaleString('en-US')} rows`;
+      // Every seeded id is either still present or was deleted through the outbox since the seed
+      // (seed truncates the outbox, so every later delete is recorded there). Gates and the
+      // simulation delete rows legitimately; a row that vanished without a trace is still caught.
+      const { rows: [r] } = await db.query<{ present: string; deleted: string; unaccounted: string }>(`
+        SELECT count(*) FILTER (WHERE c.id IS NOT NULL)                AS present,
+               count(*) FILTER (WHERE c.id IS NULL AND d.id IS NOT NULL) AS deleted,
+               count(*) FILTER (WHERE c.id IS NULL AND d.id IS NULL)     AS unaccounted
+          FROM generate_series(1, $1::bigint) AS g(id)
+          LEFT JOIN customers c ON c.id = g.id
+          LEFT JOIN (SELECT DISTINCT customer_id AS id FROM customer_changes WHERE op = 'delete') d ON d.id = g.id`,
+        [env.seedCount]);
+      const fmt = (s: string) => Number(s).toLocaleString('en-US');
+      if (Number(r.unaccounted) > 0) throw new Error(`${fmt(r.unaccounted)} seeded ids missing without a recorded delete`);
+      return `${fmt(r.present)} present, ${fmt(r.deleted)} deleted since seed`;
     },
   },
   { name: 'triggers: version bump + outbox', run: checkTriggers },
