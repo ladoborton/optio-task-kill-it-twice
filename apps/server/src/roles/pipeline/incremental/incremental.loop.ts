@@ -3,11 +3,10 @@ import { log } from '../../../shared/logger';
 import { planChanges } from '../changes/change';
 import { CheckpointRepository } from '../checkpoint/checkpoint.repository';
 import { ControlRepository } from '../control/control.repository';
-import { EsSink } from '../es/es.sink';
+import { BatchDelivery } from '../delivery/batch-delivery';
 import { CustomerSource } from '../source/customer-source';
 import { OutboxReader } from '../source/outbox-reader';
 import { StepLoop } from '../step-loop';
-import { StreamSink } from '../stream/stream.sink';
 
 /**
  * SPEC §5.4: follows the outbox and ships every committed change (upserts and deletes) to both
@@ -25,8 +24,7 @@ export class IncrementalLoop extends StepLoop {
     private readonly checkpoints: CheckpointRepository,
     private readonly outbox: OutboxReader,
     private readonly source: CustomerSource,
-    private readonly es: EsSink,
-    private readonly streamSink: StreamSink,
+    private readonly delivery: BatchDelivery,
   ) {
     super();
   }
@@ -57,28 +55,24 @@ export class IncrementalLoop extends StepLoop {
     const changes = planChanges(entries, await this.source.readByIds(ids));
     const last = entries[entries.length - 1];
     const to = { txid: last.txid, seq: last.seq };
+    const batchId = `${this.stream}:${from.txid}.${from.seq}-${to.txid}.${to.seq}`;
 
-    let written = 0, absent = 0, conflicts = 0, published = 0;
-    if (changes.length > 0) {
-      const result = await this.es.write(changes);
-      ({ written, absent, conflicts } = result);
-      published = await this.streamSink.publish(changes, this.stream);
-    }
+    const result = changes.length > 0
+      ? await this.delivery.deliver(changes, this.stream, batchId)
+      : { written: 0, absent: 0, conflicts: 0, dlq: 0, published: 0 };
 
-    // SPEC §6.2: only after both sinks acknowledged. The position covers every entry read, including
-    // ones that collapsed into another entry's change or were skipped (delete shipped later).
+    // SPEC §6.2: only after every change is acknowledged by both sinks or parked in the DLQ. The
+    // position covers every entry read, including ones that collapsed into another entry's change
+    // or were skipped (delete shipped by a later page).
     await this.checkpoints.advanceIncremental(from, to);
 
     log('incremental.batch', {
       stream: this.stream,
-      batch_id: `${this.stream}:${from.txid}.${from.seq}-${to.txid}.${to.seq}`,
+      batch_id: batchId,
       entries: entries.length,
       upserts: changes.filter((c) => c.op === 'upsert').length,
       deletes: changes.filter((c) => c.op === 'delete').length,
-      written,
-      absent,
-      conflicts,
-      published,
+      ...result,
       ms: Date.now() - startedAt,
     });
     // A full page means more is waiting; a partial page means we have caught up.

@@ -11,12 +11,23 @@ export class IndexMissingError extends Error {
   }
 }
 
-/** Some items were not accepted; the batch must not be checkpointed yet. */
-export class EsItemsFailedError extends Error {
+/** Some items hit a transient error (429/5xx); the batch must be retried, not checkpointed. */
+export class EsItemsRetryableError extends Error {
   constructor(readonly failed: FailedItem[]) {
     const first = failed[0];
-    super(`${failed.length} item(s) failed, first: ${first.status} ${first.type}: ${first.reason}`);
+    super(`${failed.length} item(s) retryable, first: ${first.status} ${first.type}: ${first.reason}`);
   }
+}
+
+/** A change the index refused for good, and why. */
+export interface Rejection {
+  change: Change;
+  failure: FailedItem;
+}
+
+export interface EsWriteResult extends BulkSummary {
+  /** Permanently rejected changes (SPEC §7.3): the caller parks them in the DLQ. */
+  rejected: Rejection[];
 }
 
 @Injectable()
@@ -27,11 +38,14 @@ export class EsSink {
   ) {}
 
   /**
-   * Writes a batch with one _bulk request. Resolves only if every change is acknowledged
-   * (written, 409 = already there, or delete of an absent doc); otherwise throws, so the caller
-   * does not checkpoint. Transport errors (ES down, timeout) propagate as thrown client errors.
+   * Writes a batch with one _bulk request and classifies every item (SPEC §7.3):
+   * - acknowledged (written / 409 already there / delete of an absent doc) → counted;
+   * - permanently rejected (the document itself is bad) → returned in `rejected`, the batch goes on;
+   * - transient (429/5xx) or missing index → throws, the whole batch is retried with backoff.
+   * Retrying the whole batch is safe: the items that did succeed come back as 409.
+   * Transport errors (ES down, timeout) propagate as thrown client errors.
    */
-  async write(changes: Change[]): Promise<BulkSummary> {
+  async write(changes: Change[]): Promise<EsWriteResult> {
     await this.index.ensureReady();
 
     // SPEC §5.5 / §6.3: _id = customer id and external versioning make every write idempotent and
@@ -54,9 +68,10 @@ export class EsSink {
       this.index.invalidate();
       throw new IndexMissingError(this.index.name);
     }
-    // S2 scope: any rejected item fails the whole batch, which is then retried with backoff.
-    // SPEC §7.3 (permanent failures → DLQ, the rest proceed) arrives with G4 in S5.
-    if (summary.failed.length) throw new EsItemsFailedError(summary.failed);
-    return summary;
+    const retryable = summary.failed.filter((f) => f.outcome === 'retryable');
+    if (retryable.length) throw new EsItemsRetryableError(retryable);
+
+    const rejected = summary.failed.map((failure) => ({ change: changes[failure.position], failure }));
+    return { ...summary, rejected };
   }
 }

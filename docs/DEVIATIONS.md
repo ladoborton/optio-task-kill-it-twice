@@ -79,3 +79,22 @@ Kinds:
   loop (lag grows) instead of losing data. G2 was extended with an 8-second transaction on an
   already-backfilled customer, so only the incremental loop can deliver it. SPEC v1.3.
 - Decision or accident?: decision.
+
+### D-004 — How a DLQ replay is triggered and where it goes
+- Date / slice: 2026-09-29 / S5
+- Kind: spec
+- SPEC said: §7.4 "Replay … re-reads the current source row … and sends it through the same sink path";
+  §9 `POST /api/dlq/replay`; §6.2 order "ES → RabbitMQ → DLQ rows → checkpoint". It did not say who
+  performs a replay or how a request survives a crash, and "the same sink path" is ambiguous.
+- What happened: there is no api yet (S7+), and G4 needs a replay.
+- Resolution:
+  1. A replay is **requested in Postgres** (`dlq_records.replay_requested_at`, new migration) and carried
+     out by a third pipeline loop (`DlqReplayLoop`) — the same desired-state pattern as `pipeline_control`.
+     The api will only set that column.
+  2. A replay goes **only to the sink that rejected the record** (ES). The stream never rejected it, and a
+     fix made in the source reaches the stream through the incremental loop anyway.
+  3. Order inside a batch is ES → DLQ rows → RabbitMQ → checkpoint. Equivalent for the guarantee (both
+     before the checkpoint), and a rejection is persisted as early as possible.
+  4. `sink = 'stream'` DLQ rows are never produced: RabbitMQ does not reject individual messages that the
+     broker accepted; the consumer's poison messages go to the RabbitMQ dead-letter queue instead.
+- Decision or accident?: decision.

@@ -32,6 +32,9 @@ export const config = {
   consumerBatchSize: int('CONSUMER_BATCH_SIZE', 500),
   // Flush a partial batch after this long, so a quiet stream is not held back waiting for 500.
   consumerFlushMs: int('CONSUMER_FLUSH_MS', 50),
+  // SPEC §7.4: DLQ replay requests handled per step, and how often to look for new ones.
+  dlqReplayBatch: int('DLQ_REPLAY_BATCH', 100),
+  dlqReplayPollMs: int('DLQ_REPLAY_POLL_MS', 1_000),
   // SPEC §7.2: retry delays grow 0.5 s → 1 → 2 → 4 … up to 30 s.
   retryBaseMs: int('RETRY_BASE_MS', 500),
   retryMaxMs: int('RETRY_MAX_MS', 30_000),

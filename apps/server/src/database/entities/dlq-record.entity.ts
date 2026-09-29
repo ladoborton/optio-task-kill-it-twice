@@ -49,4 +49,8 @@ export class DlqRecord {
 
   @Column('timestamptz', { name: 'last_attempt_at' })
   lastAttemptAt: Date;
+
+  /** Set to request a replay; cleared by the pipeline once the attempt is made (SPEC §7.4). */
+  @Column('timestamptz', { name: 'replay_requested_at', nullable: true })
+  replayRequestedAt: Date | null;
 }

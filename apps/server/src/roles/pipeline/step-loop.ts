@@ -15,7 +15,8 @@ import { CheckpointMovedError } from './checkpoint/checkpoint.repository';
  * written again on restart (SPEC §6.1: at-least-once, idempotent sinks).
  */
 export abstract class StepLoop implements OnApplicationBootstrap, BeforeApplicationShutdown {
-  protected abstract readonly stream: StreamName;
+  /** Log prefix and `stream` field: backfill | incremental | dlq_replay. */
+  protected abstract readonly stream: StreamName | 'dlq_replay';
   private readonly stopping = new AbortController();
   private loop?: Promise<void>;
 

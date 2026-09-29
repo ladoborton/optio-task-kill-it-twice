@@ -3,10 +3,9 @@ import { log } from '../../../shared/logger';
 import { upsert } from '../changes/change';
 import { CheckpointRepository } from '../checkpoint/checkpoint.repository';
 import { ControlRepository } from '../control/control.repository';
-import { EsSink } from '../es/es.sink';
+import { BatchDelivery } from '../delivery/batch-delivery';
 import { CustomerSource } from '../source/customer-source';
 import { StepLoop } from '../step-loop';
-import { StreamSink } from '../stream/stream.sink';
 
 /** SPEC §5.3: copies every existing customer into both sinks, one keyset page at a time. */
 @Injectable()
@@ -19,8 +18,7 @@ export class BackfillLoop extends StepLoop {
     private readonly control: ControlRepository,
     private readonly checkpoints: CheckpointRepository,
     private readonly source: CustomerSource,
-    private readonly es: EsSink,
-    private readonly streamSink: StreamSink,
+    private readonly delivery: BatchDelivery,
   ) {
     super();
   }
@@ -58,13 +56,11 @@ export class BackfillLoop extends StepLoop {
     // Deterministic: a batch replayed after a crash gets the same id, so logs/DLQ entries line up.
     const batchId = `${this.stream}:${from}-${to}`;
     const startedAt = Date.now();
-    const changes = rows.map(upsert);
+    const result = await this.delivery.deliver(rows.map(upsert), this.stream, batchId);
 
-    const result = await this.es.write(changes);
-    const published = await this.streamSink.publish(changes, this.stream);
-
-    // SPEC §6.2: the checkpoint moves only after BOTH sinks acknowledged every record of the batch.
-    // A crash before this line means the batch is written again after restart — never skipped.
+    // SPEC §6.2: the checkpoint moves only after every record of the batch is acknowledged by both
+    // sinks or parked in the DLQ. A crash before this line means the batch is written again after
+    // restart — never skipped.
     await this.checkpoints.advance(this.stream, from, to);
 
     log('backfill.batch', {
@@ -73,9 +69,7 @@ export class BackfillLoop extends StepLoop {
       from: Number(from),
       to: Number(to),
       count: rows.length,
-      written: result.written,
-      conflicts: result.conflicts,
-      published,
+      ...result,
       ms: Date.now() - startedAt,
     });
     return 0;
