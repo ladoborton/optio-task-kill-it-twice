@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/shared/backoff.spec.ts src/roles/pipeline/es/bulk-result.spec.ts src/shared/rabbitmq/customer-event.spec.ts src/roles/pipeline/changes/change.spec.ts"
+    "test": "tsx --test src/shared/backoff.spec.ts src/roles/pipeline/es/bulk-result.spec.ts src/shared/rabbitmq/customer-event.spec.ts src/roles/pipeline/changes/change.spec.ts src/shared/circuit-breaker.spec.ts"
   },
   "dependencies": {
     "@elastic/elasticsearch": "~8.15.0",

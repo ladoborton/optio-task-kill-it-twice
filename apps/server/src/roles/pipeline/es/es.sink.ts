@@ -1,6 +1,8 @@
 import { Client } from '@elastic/elasticsearch';
 import { Inject, Injectable } from '@nestjs/common';
+import { CircuitBreaker } from '../../../shared/circuit-breaker';
 import { ES_CLIENT } from '../../../shared/elasticsearch';
+import { ES_BREAKER } from '../breakers';
 import { Change } from '../changes/change';
 import { BulkItem, BulkSummary, FailedItem, summarize } from './bulk-result';
 import { CustomerIndex, toDocument } from './customer-index';
@@ -34,8 +36,14 @@ export interface EsWriteResult extends BulkSummary {
 export class EsSink {
   constructor(
     @Inject(ES_CLIENT) private readonly es: Client,
+    @Inject(ES_BREAKER) private readonly breaker: CircuitBreaker,
     private readonly index: CustomerIndex,
   ) {}
+
+  /** write() behind the index's circuit breaker: while it is open, fails fast without a request. */
+  write(changes: Change[]): Promise<EsWriteResult> {
+    return this.breaker.run(() => this.bulk(changes));
+  }
 
   /**
    * Writes a batch with one _bulk request and classifies every item (SPEC §7.3):
@@ -45,7 +53,7 @@ export class EsSink {
    * Retrying the whole batch is safe: the items that did succeed come back as 409.
    * Transport errors (ES down, timeout) propagate as thrown client errors.
    */
-  async write(changes: Change[]): Promise<EsWriteResult> {
+  private async bulk(changes: Change[]): Promise<EsWriteResult> {
     await this.index.ensureReady();
 
     // SPEC §5.5 / §6.3: _id = customer id and external versioning make every write idempotent and

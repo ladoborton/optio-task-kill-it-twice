@@ -35,9 +35,14 @@ export const config = {
   // SPEC §7.4: DLQ replay requests handled per step, and how often to look for new ones.
   dlqReplayBatch: int('DLQ_REPLAY_BATCH', 100),
   dlqReplayPollMs: int('DLQ_REPLAY_POLL_MS', 1_000),
-  // SPEC §7.2: retry delays grow 0.5 s → 1 → 2 → 4 … up to 30 s.
+  // SPEC §7.2: retry delays grow 0.5 s → 1 → 2 → 4 → 5 s. The cap is short on purpose (D-005): a
+  // down sink is protected by its circuit breaker, not by loops sleeping for long.
   retryBaseMs: int('RETRY_BASE_MS', 500),
-  retryMaxMs: int('RETRY_MAX_MS', 30_000),
+  retryMaxMs: int('RETRY_MAX_MS', 5_000),
+  // SPEC §7.2: consecutive failures that open a sink's circuit, and how long it stays open before
+  // one probe request is let through.
+  breakerThreshold: int('BREAKER_THRESHOLD', 5),
+  breakerOpenMs: int('BREAKER_OPEN_MS', 5_000),
   // SPEC §4.8: 1M rows by default.
   seedCount: int('SEED_COUNT', 1_000_000),
   // Rows per INSERT statement during seed; keeps each statement (and its WAL) bounded.

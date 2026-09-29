@@ -1,6 +1,7 @@
 import { BeforeApplicationShutdown, OnApplicationBootstrap } from '@nestjs/common';
 import { StreamName } from '../../database/entities/pipeline-checkpoint.entity';
 import { backoffDelay } from '../../shared/backoff';
+import { CircuitOpenError } from '../../shared/circuit-breaker';
 import { config } from '../../shared/config';
 import { log } from '../../shared/logger';
 import { sleep } from '../../shared/sleep';
@@ -19,6 +20,7 @@ export abstract class StepLoop implements OnApplicationBootstrap, BeforeApplicat
   protected abstract readonly stream: StreamName | 'dlq_replay';
   private readonly stopping = new AbortController();
   private loop?: Promise<void>;
+  private waitingOn?: string;
 
   /** One batch. Returns how long to idle before the next step (0 = continue immediately). */
   protected abstract step(): Promise<number>;
@@ -41,8 +43,17 @@ export abstract class StepLoop implements OnApplicationBootstrap, BeforeApplicat
       try {
         const idleMs = await this.step();
         failures = 0;
+        this.waitingOn = undefined;
         if (idleMs > 0) await sleep(idleMs, signal);
       } catch (e) {
+        if (e instanceof CircuitOpenError) {
+          // The sink is known to be down; its breaker says when the next probe is due. Wait exactly
+          // that long — no request is made, nothing to count as a failure. Logged once per outage.
+          if (this.waitingOn !== e.sink) log(`${this.stream}.waiting_for_sink`, { stream: this.stream, sink: e.sink }, 'warn');
+          this.waitingOn = e.sink;
+          await sleep(e.retryAfterMs, signal);
+          continue;
+        }
         if (e instanceof CheckpointMovedError) {
           // Someone reset the checkpoint (seed, api, verify). Drop the batch; the next step
           // re-reads the checkpoint and starts from the new position.

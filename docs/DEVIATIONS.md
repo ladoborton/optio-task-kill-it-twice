@@ -98,3 +98,24 @@ Kinds:
   4. `sink = 'stream'` DLQ rows are never produced: RabbitMQ does not reject individual messages that the
      broker accepted; the consumer's poison messages go to the RabbitMQ dead-letter queue instead.
 - Decision or accident?: decision.
+
+### D-005 — Breaker and backoff timings; G3 did not fail first
+- Date / slice: 2026-09-29 / S6
+- Kind: spec (timings) and process (gate-first)
+- SPEC said: §7.2 backoff "0.5 s → 1 → 2 → 4 … capped at 30 s"; breaker "5 consecutive failures ⇒ open
+  for 15 s, then one probe". AGENTS §2: a slice's gate must FAIL before the feature exists.
+- What happened: G3 passed on the S5 code already — per-loop backoff (built in S2) was enough for 0 lost
+  and no busy loop. The agent first reported a 89 s recovery as the problem the breaker would fix; that
+  number was not reproducible (later backoff-only runs: first write 3.8 s and 8.5 s after recovery), and
+  part of it was verify's own measurement (it counted its "3 quiet polls" as recovery time). The claim was
+  withdrawn and the measurement fixed (convergence time = start of the quiet streak; "resumed" = first
+  successful write) before anything was committed.
+- Why it matters: the real effect of the breaker is a bounded worst case, not a better average. With a
+  30 s backoff cap, a loop can sleep up to 30 s after the sink is back; with a breaker every waiting loop
+  wakes at the next probe (one request per interval for all loops together).
+- Resolution: breaker per sink (ES, RabbitMQ) shared by all loops; open interval **5 s** (not 15 s) and
+  backoff cap **5 s** (not 30 s) — a down sink is protected by the breaker's single probe, so long per-loop
+  sleeps only delay recovery. G3 bound: writing resumes ≤ 15 s after the index is healthy. Measured with
+  the breaker: 0.6–3.7 s to resume, 19–21 s to drain a one-minute backlog. SPEC v1.5.
+- Decision or accident?: timings — decision; the 89 s claim — an agent mistake, caught by measuring
+  again before committing.

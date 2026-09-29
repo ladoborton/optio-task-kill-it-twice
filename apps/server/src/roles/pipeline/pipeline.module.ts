@@ -7,6 +7,7 @@ import { CheckpointRepository } from './checkpoint/checkpoint.repository';
 import { ControlRepository } from './control/control.repository';
 import { CustomerIndex } from './es/customer-index';
 import { EsSink } from './es/es.sink';
+import { breakerProviders } from './breakers';
 import { BatchDelivery } from './delivery/batch-delivery';
 import { DlqReplayLoop } from './dlq/dlq-replay.loop';
 import { DlqRepository } from './dlq/dlq.repository';
@@ -19,6 +20,7 @@ import { StreamSink } from './stream/stream.sink';
   imports: [TypeOrmModule.forRoot(dataSourceOptions)],
   providers: [
     esClientProvider,
+    ...breakerProviders,
     CustomerIndex,
     EsSink,
     StreamSink,

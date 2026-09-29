@@ -1,9 +1,11 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { connect, ConfirmChannel } from 'amqplib';
+import { CircuitBreaker } from '../../../shared/circuit-breaker';
 import { config } from '../../../shared/config';
 import { log } from '../../../shared/logger';
 import { CustomerEvent } from '../../../shared/rabbitmq/customer-event';
 import { assertTopology, EXCHANGE, routingKey } from '../../../shared/rabbitmq/topology';
+import { STREAM_BREAKER } from '../breakers';
 import { Change } from '../changes/change';
 import { toDocument } from '../es/customer-index';
 
@@ -19,7 +21,14 @@ export class StreamSink implements OnApplicationShutdown {
   private connection?: Connection;
   private channel?: ConfirmChannel;
 
-  async publish(changes: Change[], source: CustomerEvent['source']): Promise<number> {
+  constructor(@Inject(STREAM_BREAKER) private readonly breaker: CircuitBreaker) {}
+
+  /** publish() behind the broker's circuit breaker: while it is open, fails fast without connecting. */
+  publish(changes: Change[], source: CustomerEvent['source']): Promise<number> {
+    return this.breaker.run(() => this.publishConfirmed(changes, source));
+  }
+
+  private async publishConfirmed(changes: Change[], source: CustomerEvent['source']): Promise<number> {
     const ch = await this.confirmChannel();
     const emittedAt = new Date().toISOString();
     for (const change of changes) {
