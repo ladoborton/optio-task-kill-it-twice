@@ -7,6 +7,7 @@
 | v1      | 2026-09-24 | Initial spec, written before any code. Decisions marked **(tentative)** and everything in §14 are expected to change once measured. |
 | v1.1    | 2026-09-24 | **Data access: TypeORM with hot-path rules (§5.6)** instead of the implied raw `pg`. Why: the first argument against an ORM (race in consumer dedup) was really about `repository.save()`, not TypeORM — QueryBuilder expresses the same atomic SQL. TypeORM gives the Nest-idiomatic structure (entities, migrations, DI) the team expects; the rules keep the critical SQL explicit. Added one-shot `migrate` service (§5.1) and single-gate verify runs (§11). |
 | v1.2    | 2026-09-28 | **Checkpoint writes are compare-and-set; seed stops the pipeline (§4.8, §6.2).** Why: v1 assumed the pipeline is the only writer of checkpoints — a reset during a batch would be overwritten and rows skipped (D-001). Also recorded: measured ES-only backfill ≈ 12k rec/s (1M in ~85 s), faster than the 2–5k estimate; volume stays 1M until the stream sink is added and re-measured. |
+| v1.3    | 2026-09-28 | **Incremental reads only finished transactions, in (txid, seq) order (§4.2, §4.3, §5.4).** Why: the v1 "skip a gap after 5 s" rule loses the change of any transaction open longer than 5 s (D-003, reproduced by hand; G2 now contains such a transaction). Also: consumer applies events in batches of ≤ 500 per transaction (§6.3, D-002); versioned deletes and `gc_deletes` (§5.5); G2 procedure (§11). Measured with the stream sink: backfill ≈ 7k rec/s (1M in ~2.4 min) — 1M stays. |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -81,7 +82,8 @@ Filled by an `AFTER INSERT/UPDATE/DELETE` trigger on `customers`, in the same tr
 
 | Column       | Type           | Notes |
 |--------------|----------------|-------|
-| `seq`        | `BIGSERIAL` PK | the incremental cursor |
+| `seq`        | `BIGSERIAL` PK | allocation order (not commit order — see §5.4) |
+| `txid`       | `BIGINT`       | writing transaction, `pg_current_xact_id()` default (v1.3) |
 | `customer_id`| `BIGINT`       | |
 | `op`         | `TEXT`         | `upsert` \| `delete` |
 | `version`    | `BIGINT`       | for deletes: `OLD.version + 1`, so a delete always beats the last upsert |
@@ -92,10 +94,10 @@ This keeps the outbox small and means a burst of 10 updates to one row doesn't n
 
 ### 4.3 `pipeline_checkpoints`
 
-| `stream` (PK)  | `position` | `updated_at` |
-|----------------|------------|--------------|
-| `backfill`     | last fully-handled `customers.id` | |
-| `incremental`  | last fully-handled `customer_changes.seq` | |
+| `stream` (PK)  | `position_txid` | `position` | `completed_at`, `updated_at` |
+|----------------|-----------------|------------|--------------|
+| `backfill`     | 0 | last fully-handled `customers.id` | |
+| `incremental`  | last fully-handled outbox `txid` | … and its `seq` | |
 
 ### 4.4 `dlq_records`
 
@@ -197,16 +199,22 @@ flowchart LR
 
 ### 5.4 Incremental path
 
-1. Read `position` for `incremental`.
-2. `SELECT … FROM customer_changes WHERE seq > $position ORDER BY seq LIMIT $batch_size`, collapse to the
-   highest version per `customer_id`, join current rows from `customers` (missing row ⇒ delete).
-3. Write to both sinks, advance checkpoint to the last `seq`.
-4. If nothing new: sleep `poll_interval_ms`.
+1. Read the `(position_txid, position)` checkpoint for `incremental`.
+2. `SELECT … FROM customer_changes WHERE (txid, seq) > (:txid, :seq)
+   AND txid < pg_snapshot_xmin(pg_current_snapshot()) ORDER BY txid, seq LIMIT :batch_size`.
+3. One change per customer: its **current** row ⇒ upsert; row missing and the page holds its delete entry ⇒
+   delete with that entry's version; row missing without a delete entry in this page ⇒ skip (a later page
+   carries the delete).
+4. Write to both sinks, advance the checkpoint (compare-and-set) to the last `(txid, seq)` read.
+5. If the page was not full: sleep `poll_interval_ms`.
 
-Known risk — **sequence commit-order gaps**: `seq` is assigned at insert, but transactions commit in a
-different order, so `seq=101` can be visible before `seq=100` commits. Advancing past 100 would lose it.
-v1 approach: only consume up to the first gap; if a gap persists longer than 5 s, treat it as a rolled-back
-transaction and skip it (logged + counted). See §14.
+**Commit-order gaps (v1.3, D-003).** `seq` is assigned at insert, but transactions commit in a different
+order: `seq=101` can be visible while `seq=100` is still uncommitted, and a checkpoint past 101 would lose
+100 for good. v1 proposed "skip a gap after 5 s", which loses the change of any transaction open longer
+than that. Instead the loop reads only rows of **finished** transactions (`txid` below the snapshot's
+`xmin`, the oldest running transaction) in `(txid, seq)` order — a set that can never grow behind the
+position. Cost: a long-running transaction anywhere in the database holds the loop back (lag grows);
+it never loses data.
 
 ### 5.5 Backfill and incremental at the same time
 
@@ -215,7 +223,9 @@ earlier) writes v4 over it. Prevented by the sinks, not by locking:
 
 - **ES:** `version_type=external` with `version = customers.version`. ES rejects a write whose version is
   not greater than the stored one. A `409 version_conflict` is treated as **success** (a newer or identical
-  version is already there).
+  version is already there). Deletes are versioned too and leave a tombstone; `index.gc_deletes` is 1 h
+  (default 60 s) so a late, older upsert is still rejected after a long retry. A delete of a document the
+  index never had (`404 not_found`) counts as success.
 - **Consumer:** applies an event only if `version` > the version in its projection (§6.3).
 
 ### 5.6 Data access rules (TypeORM)
@@ -263,10 +273,12 @@ the old position and skip rows.
 - **ES:** `_id = customer id`, external version. Replays are no-ops (409 → success).
 - **RabbitMQ:** message carries `customer_id`, `version`, `op`, `source` (`backfill`|`incremental`),
   `message_id = "{id}:{version}"`. Durable exchange, persistent messages, publisher confirms.
-- **Consumer:** manual ack; in **one Postgres transaction** it inserts into `consumer_applied(customer_id, version)`
-  (PK ⇒ duplicate detected) and updates `consumer_customers(id, version, deleted, …)` only if the version
-  is newer; then acks. Duplicate delivery ⇒ counted in `consumer_duplicates_total`, acked, ignored.
-  Store is Postgres (separate schema), not Redis, because dedup and side effect must commit atomically.
+- **Consumer:** manual ack; messages are grouped (≤ 500 or 50 ms, D-002) and each group is applied in
+  **one Postgres transaction**: insert into `consumer.applied_events(customer_id, version)` with
+  `ON CONFLICT DO NOTHING RETURNING` (PK ⇒ duplicate detected), upsert `consumer.customers(id, version,
+  deleted, …)` only where the version is newer, add to `consumer.stats(applied, duplicates)`; then one
+  `ack(last, multiple)`. Nothing is acked before its transaction commits.
+  Store is Postgres (schema `consumer`), not Redis, because dedup and side effect must commit atomically.
 
 ## 7. Failure handling
 
@@ -355,7 +367,7 @@ Gates run in order on the same dataset; a failed gate prints `FAIL (reason)` and
 | Gate | Procedure | PASS when |
 |------|-----------|-----------|
 | G1 | Reset backfill; wait until checkpoint ≥ 30%; `docker kill pipeline`; record checkpoint; `docker start pipeline` | first post-restart batch starts at the saved checkpoint (from logs/metrics, not from 0) and backfill completes |
-| G2 | After G1 (+ one more random kill during backfill, + concurrent change traffic) wait for backfill completed and lag = 0 | ES doc count = source count; full streamed comparison of `(id, version)` source vs ES and source vs consumer projection: 0 missing, 0 stale; report stream duplicates delivered vs applied (applied dupes must be 0) |
+| G2 | Reset index, projection, queue; backfill from 0, incremental from the outbox end. During the run: change traffic (updates, multi-row updates, inserts, deletes) and one 8 s transaction on an already-backfilled customer; kill pipeline at 25 % and 75 %, consumer at 50 %. Wait for backfill completed, incremental lag = 0, queue drained | ES doc count = source count; full comparison of `(id, version)` source vs ES (page by page) and source vs consumer projection (SQL join): 0 missing, 0 stale, 0 extra (deleted customers gone); report stream deliveries vs duplicates absorbed |
 | G3 | During change traffic, stop ES for 60 s, then start | 0 lost (as G2 comparison); CPU of pipeline during outage below threshold via `docker stats`; retry attempts bounded by backoff schedule; time to catch up after ES returns |
 | G4 | Wait for idle; set batch_size 500; insert 500 rows in one transaction, 3 with bad `attributes` | 497 in ES, 3 `pending` in `dlq_records` with the same `batch_id` and error reason; then fix source + replay ⇒ 3 `replayed` |
 | G5 | Query `/metrics` and `/api/status` | all fields of §8.2 present and consistent with what G1–G4 just did (e.g. DLQ count matches G4) |
@@ -391,7 +403,8 @@ npm workspaces for `apps/*`.
 
 ## 14. Open questions
 
-1. **Outbox gap handling** (§5.4): is "wait up to 5 s then skip" safe enough, or use
+1. ~~**Outbox gap handling**~~ — resolved in v1.3 (xmin-based reading, D-003). Original question:
+   is "wait up to 5 s then skip" safe enough, or use
    `pg_current_snapshot()` / xmin-based visibility instead? Decide after building a test that forces it.
 2. **Volume**: 1M is a guess; measure backfill throughput and verify runtime, then fix the number.
 3. **G3 fault type**: `docker stop` (connection refused) vs `docker pause` (hanging connections — tests
