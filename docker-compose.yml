@@ -9,6 +9,8 @@ x-verify-env: &verify-env
   RABBITMQ_PASSWORD: optio
   COMPOSE_PROJECT: kill-it-twice
   SEED_COUNT: ${SEED_COUNT:-1000000}
+  API_URL: http://api:3000
+  PIPELINE_METRICS_URL: http://pipeline:9100/metrics
 
 x-server: &server
   build:

@@ -13,4 +13,6 @@ export const env = {
   // Compose project whose containers verify is allowed to kill/stop.
   composeProject: required('COMPOSE_PROJECT'),
   seedCount: Number(process.env.SEED_COUNT ?? 1_000_000),
+  apiUrl: required('API_URL'),
+  pipelineMetricsUrl: required('PIPELINE_METRICS_URL'),
 };
