@@ -9,6 +9,7 @@
 | v1.2    | 2026-09-28 | **Checkpoint writes are compare-and-set; seed stops the pipeline (§4.8, §6.2).** Why: v1 assumed the pipeline is the only writer of checkpoints — a reset during a batch would be overwritten and rows skipped (D-001). Also recorded: measured ES-only backfill ≈ 12k rec/s (1M in ~85 s), faster than the 2–5k estimate; volume stays 1M until the stream sink is added and re-measured. |
 | v1.3    | 2026-09-28 | **Incremental reads only finished transactions, in (txid, seq) order (§4.2, §4.3, §5.4).** Why: the v1 "skip a gap after 5 s" rule loses the change of any transaction open longer than 5 s (D-003, reproduced by hand; G2 now contains such a transaction). Also: consumer applies events in batches of ≤ 500 per transaction (§6.3, D-002); versioned deletes and `gc_deletes` (§5.5); G2 procedure (§11). Measured with the stream sink: backfill ≈ 7k rec/s (1M in ~2.4 min) — 1M stays. |
 | v1.4    | 2026-09-29 | **DLQ replay is requested in Postgres and performed by a pipeline loop; it targets only the rejecting sink (§4.4, §7.4). Batch order ES → DLQ → stream (§6.2).** Why: v1 did not say who performs a replay, how a request survives a crash, or what "the same sink path" means (D-004). |
+| v1.5    | 2026-09-29 | **Breaker open interval 5 s (was 15 s), backoff cap 5 s (was 30 s); concrete G3 bounds (§7.2, §11).** Why: the breaker's single probe protects a down sink, so long per-loop sleeps only delay recovery (D-005). Measured: writing resumes 0.6–3.7 s after the index is back; a one-minute backlog drains in ~20 s. |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -290,8 +291,11 @@ Nothing to do at runtime — correctness comes from §6.2. On start the pipeline
 continues. The last partially-written batch is re-sent (≤ `batch_size` records re-written, 0 lost).
 
 ### 7.2 Sink outage (G3)
-- Per-sink client with **exponential backoff with jitter**: 0.5 s → 1 → 2 → 4 … capped at 30 s.
-- **Circuit breaker:** 5 consecutive failures ⇒ open for 15 s, then one probe; success ⇒ closed.
+- Every loop retries with **exponential backoff with jitter**: 0.5 s → 1 → 2 → 4 → capped at 5 s (v1.5).
+- **Circuit breaker per sink**, shared by all loops: 5 consecutive failures ⇒ open for 5 s (v1.5), then one
+  probe; success ⇒ closed, failure ⇒ open again. While open, calls fail fast without touching the sink and
+  loops sleep until the next probe. The short cap is deliberate (D-005): the breaker, not long per-loop
+  sleeps, protects a down sink, and long sleeps only delay recovery.
 - While a sink is down the affected loop **waits** (no busy loop, checkpoint does not move, nothing is read
   ahead). Breaker state is exported as a metric and shown in health.
 - Classification of ES bulk item errors: `409` → success; `429`, `5xx`, timeouts → retry; `400`
@@ -374,7 +378,7 @@ Gates run in order on the same dataset; a failed gate prints `FAIL (reason)` and
 |------|-----------|-----------|
 | G1 | Reset backfill; wait until checkpoint ≥ 30%; `docker kill pipeline`; record checkpoint; `docker start pipeline` | first post-restart batch starts at the saved checkpoint (from logs/metrics, not from 0) and backfill completes |
 | G2 | Reset index, projection, queue; backfill from 0, incremental from the outbox end. During the run: change traffic (updates, multi-row updates, inserts, deletes) and one 8 s transaction on an already-backfilled customer; kill pipeline at 25 % and 75 %, consumer at 50 %. Wait for backfill completed, incremental lag = 0, queue drained | ES doc count = source count; full comparison of `(id, version)` source vs ES (page by page) and source vs consumer projection (SQL join): 0 missing, 0 stale, 0 extra (deleted customers gone); report stream deliveries vs duplicates absorbed |
-| G3 | During change traffic, stop ES for 60 s, then start | 0 lost (as G2 comparison); CPU of pipeline during outage below threshold via `docker stats`; retry attempts bounded by backoff schedule; time to catch up after ES returns |
+| G3 | After a finished backfill, during change traffic, stop ES for 60 s, then start | 0 lost (as G2 comparison); pipeline CPU during the outage ≤ 10 % (sampled with `docker stats`); ≤ 40 failed requests during the outage; writing resumes ≤ 15 s after the index is healthy; time to drain the backlog reported |
 | G4 | Wait for idle; set batch_size 500; insert 500 rows in one transaction, 3 with bad `attributes` | 497 in ES, 3 `pending` in `dlq_records` with the same `batch_id` and error reason; then fix source + replay ⇒ 3 `replayed` |
 | G5 | Query `/metrics` and `/api/status` | all fields of §8.2 present and consistent with what G1–G4 just did (e.g. DLQ count matches G4) |
 
