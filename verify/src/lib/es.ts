@@ -33,6 +33,20 @@ export async function versionsInRange(from: number, to: number): Promise<Map<num
   return new Map(body.hits.hits.map((h) => [Number(h._id), h._version]));
 }
 
+/** Which of the given ids exist in the index (after a refresh), with their versions. */
+export async function versionsOf(ids: number[]): Promise<Map<number, number>> {
+  await call('POST', `/${INDEX}/_refresh`);
+  const res = await fetch(`${env.esUrl}/${INDEX}/_search`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(30_000),
+    body: JSON.stringify({ size: ids.length, _source: false, version: true, query: { ids: { values: ids.map(String) } } }),
+  });
+  if (!res.ok) throw new Error(`search ids -> HTTP ${res.status}`);
+  const body = (await res.json()) as { hits: { hits: { _id: string; _version: number }[] } };
+  return new Map(body.hits.hits.map((h) => [Number(h._id), h._version]));
+}
+
 /** Document count after a refresh, so recently indexed docs are visible. 0 if the index is missing. */
 export async function countDocs(): Promise<number> {
   const refresh = await call('POST', `/${INDEX}/_refresh`);

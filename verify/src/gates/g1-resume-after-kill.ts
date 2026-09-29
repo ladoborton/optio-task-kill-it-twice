@@ -60,6 +60,8 @@ export const g1: Check = {
     steps.push(`completed: ${fmt(sourceRows)} source / ${fmt(docs)} index`);
     if (docs !== sourceRows) return fail(`${fmt(sourceRows - docs)} rows missing from the index`, steps);
 
-    return pass(`killed at ${fmt(docsAtKill)} / resumed at ${fmt(resumedFrom)}, 0 lost`, steps);
+    // Positions are customer ids; once rows have been deleted, ids and doc counts differ, so report
+    // them as what they are.
+    return pass(`killed at id ${fmt(killedAt)} (${fmt(docsAtKill)} docs indexed) / resumed at id ${fmt(resumedFrom)}, 0 lost`, steps);
   },
 };
