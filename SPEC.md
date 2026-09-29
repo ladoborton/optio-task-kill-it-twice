@@ -10,6 +10,7 @@
 | v1.3    | 2026-09-28 | **Incremental reads only finished transactions, in (txid, seq) order (§4.2, §4.3, §5.4).** Why: the v1 "skip a gap after 5 s" rule loses the change of any transaction open longer than 5 s (D-003, reproduced by hand; G2 now contains such a transaction). Also: consumer applies events in batches of ≤ 500 per transaction (§6.3, D-002); versioned deletes and `gc_deletes` (§5.5); G2 procedure (§11). Measured with the stream sink: backfill ≈ 7k rec/s (1M in ~2.4 min) — 1M stays. |
 | v1.4    | 2026-09-29 | **DLQ replay is requested in Postgres and performed by a pipeline loop; it targets only the rejecting sink (§4.4, §7.4). Batch order ES → DLQ → stream (§6.2).** Why: v1 did not say who performs a replay, how a request survives a crash, or what "the same sink path" means (D-004). |
 | v1.5    | 2026-09-29 | **Breaker open interval 5 s (was 15 s), backoff cap 5 s (was 30 s); concrete G3 bounds (§7.2, §11).** Why: the breaker's single probe protects a down sink, so long per-loop sleeps only delay recovery (D-005). Measured: writing resumes 0.6–3.7 s after the index is back; a one-minute backlog drains in ~20 s. |
+| v1.6    | 2026-09-30 | **`/api/status` reads only durable state; heartbeat carries breaker states (§4.7, §8.2).** Why: a status that asks the pipeline depends on the process whose death it must report (D-006). |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -126,8 +127,9 @@ Stored in Postgres (not in pipeline memory) so a paused pipeline stays paused af
 
 ### 4.7 `pipeline_heartbeat`
 
-Pipeline writes `(instance_id, started_at, last_beat_at, backfill_rate, incremental_rate)` every 2 s.
-Lets the API report "pipeline is dead" and last known throughput even while the pipeline is down.
+Pipeline writes `(instance_id, started_at, last_beat_at, backfill_rate, incremental_rate, details)` every
+2 s; `details` holds each sink's breaker state (v1.6). Lets the API report "pipeline is dead" and last
+known throughput and breaker states even while the pipeline is down.
 
 ### 4.8 Data volume: 1,000,000 customers (tentative)
 
@@ -331,8 +333,9 @@ stays `pending`, latest reason kept. Consumer DLQ messages can be shovelled back
 | `pipeline_outbox_gaps_skipped_total` | counter | see §5.4 |
 
 ### 8.2 `GET /api/status` (api service)
-Built from durable facts in Postgres (checkpoints, heartbeat, DLQ, outbox) plus live pipeline metrics when
-reachable — so it answers even while the pipeline is dead: backfill position / total / % / state,
+Built **only** from durable sources — Postgres (checkpoints, heartbeat, DLQ, outbox, consumer counters) and
+the RabbitMQ management API; the api never asks the pipeline process (v1.6, D-006) — so it answers even
+while the pipeline is dead: backfill position / total / % / state,
 throughput (rec/s, 10 s window), incremental lag (events + seconds), DLQ counts per sink, sink states,
 consumer stats, overall health.
 
