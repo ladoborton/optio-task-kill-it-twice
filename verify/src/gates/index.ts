@@ -1,6 +1,7 @@
 import { Check, fail } from '../types';
 import { g1 } from './g1-resume-after-kill';
 import { g2 } from './g2-no-duplicates';
+import { g3 } from './g3-sink-outage';
 import { g4 } from './g4-partial-batch';
 
 // Placeholders: each gate is implemented in its slice (gate first, then feature).
@@ -13,7 +14,7 @@ const notImplemented = (id: string, title: string, slice: string): Check => ({
 export const gates: Check[] = [
   g1,
   g2,
-  notImplemented('G3', 'sink outage', 'S6'),
+  g3,
   g4,
   notImplemented('G5', 'observability', 'S7'),
 ];

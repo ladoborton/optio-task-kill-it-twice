@@ -6,6 +6,17 @@ async function call(method: string, path: string): Promise<Response> {
   return fetch(`${env.esUrl}${path}`, { method, signal: AbortSignal.timeout(30_000) });
 }
 
+/** True when the cluster answers and is at least yellow. */
+export async function esHealthy(): Promise<boolean> {
+  try {
+    const res = await fetch(`${env.esUrl}/_cluster/health`, { signal: AbortSignal.timeout(3_000) });
+    if (!res.ok) return false;
+    return ((await res.json()) as { status: string }).status !== 'red';
+  } catch {
+    return false;
+  }
+}
+
 export async function deleteIndex(): Promise<void> {
   const res = await call('DELETE', `/${INDEX}`);
   if (!res.ok && res.status !== 404) throw new Error(`DELETE /${INDEX} -> HTTP ${res.status}`);

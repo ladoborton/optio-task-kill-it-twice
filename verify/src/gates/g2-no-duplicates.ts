@@ -1,22 +1,13 @@
 import { Check, fail, pass } from '../types';
+import { compareAll, describe, QUEUE, waitConverged } from '../lib/compare';
 import { db, scalar } from '../lib/db';
 import { kill, start, stop } from '../lib/docker';
-import { countDocs, deleteIndex, versionsInRange } from '../lib/es';
-import { purgeQueue, queueStats } from '../lib/rabbit';
-import {
-  backfillCompleted,
-  backfillPosition,
-  fmt,
-  incrementalLagEvents,
-  MIN,
-  resetBackfill,
-  resetIncrementalToOutboxEnd,
-} from '../lib/state';
+import { deleteIndex, versionsInRange } from '../lib/es';
+import { purgeQueue } from '../lib/rabbit';
+import { backfillCompleted, backfillPosition, fmt, MIN, resetBackfill, resetIncrementalToOutboxEnd } from '../lib/state';
 import { slowTransaction, startTraffic } from '../lib/traffic';
 import { sleep, waitFor } from '../lib/wait';
 
-const QUEUE = 'consumer.customers';
-const PAGE = 10_000; // ids per comparison page (ES max_result_window)
 const SLOW_TX_MS = 8_000; // longer than the 5 s "skip the gap" timeout SPEC v1 proposed
 
 // SPEC §11 G2: backfill and incremental sync run together under change traffic (updates, inserts,
@@ -78,67 +69,18 @@ export const g2: Check = {
     }
 
     // 4. Wait until nothing is in flight anywhere: outbox consumed, queue drained.
-    let lagQuiet = 0;
-    await waitFor('incremental lag to reach 0', async () => {
-      lagQuiet = (await incrementalLagEvents()) === 0 ? lagQuiet + 1 : 0;
-      return lagQuiet >= 3 ? true : undefined;
-    }, 10 * MIN, 1_000);
-    let quietPolls = 0;
-    await waitFor(
-      `queue ${QUEUE} to drain`,
-      async () => {
-        const q = await queueStats(QUEUE);
-        quietPolls = q && q.messages === 0 && q.unacked === 0 ? quietPolls + 1 : 0;
-        return quietPolls >= 3 ? true : undefined;
-      },
-      10 * MIN,
-      1_000,
-    );
+    await waitConverged();
 
-    // Highest id ever handed out, so rows inserted and then deleted are checked for leftovers too.
-    const maxId = Number(await scalar<string>('SELECT greatest((SELECT max(id) FROM customers), (SELECT last_value FROM customers_id_seq))'));
-
-    // 5. Compare (id, version) source ↔ index, page by page (never the whole table in memory).
-    const sourceRows = Number(await scalar<string>('SELECT count(*) FROM customers'));
-    const indexDocs = await countDocs();
-    let esMissing = 0, esStale = 0, esExtra = 0;
-    for (let from = 1; from <= maxId; from += PAGE) {
-      const to = from + PAGE - 1;
-      const { rows } = await db.query<{ id: string; version: string }>(
-        'SELECT id, version FROM customers WHERE id BETWEEN $1 AND $2', [from, to]);
-      const index = await versionsInRange(from, to);
-      for (const r of rows) {
-        const v = index.get(Number(r.id));
-        if (v === undefined) esMissing++;
-        else if (v !== Number(r.version)) esStale++;
-        index.delete(Number(r.id));
-      }
-      esExtra += index.size;
-    }
-
-    // The slow transaction's change specifically (also covered by the full comparison above).
+    // 5. The slow transaction's change specifically (also covered by the full comparison below).
     const slowSource = await scalar<string | null>('SELECT version FROM customers WHERE id = $1', [slowId]);
     const slowIndex = (await versionsInRange(slowId, slowId)).get(slowId);
     steps.push(`slow transaction: source v${slowSource ?? '-'} / index v${slowIndex ?? '-'}`);
 
-    // 6. Compare source ↔ consumer projection in one SQL join (same Postgres, separate schema).
-    const { rows: [c] } = await db.query<{ missing: string; stale: string; extra: string; projected: string }>(`
-      SELECT count(*) FILTER (WHERE p.id IS NULL)                                          AS missing,
-             count(*) FILTER (WHERE s.id IS NOT NULL AND p.id IS NOT NULL
-                                AND (p.version <> s.version OR p.deleted))                 AS stale,
-             count(*) FILTER (WHERE s.id IS NULL AND NOT p.deleted)                        AS extra,
-             count(*) FILTER (WHERE p.id IS NOT NULL AND NOT p.deleted)                    AS projected
-        FROM public.customers s
-        FULL JOIN consumer.customers p ON p.id = s.id`);
-    const stats = (await db.query<{ applied: string; duplicates: string }>('SELECT applied, duplicates FROM consumer.stats')).rows[0];
-
-    steps.push(`index: ${fmt(indexDocs)} docs, ${esMissing} missing, ${esStale} stale, ${esExtra} extra`);
-    steps.push(`consumer: ${fmt(Number(c.projected))} rows, ${c.missing} missing, ${c.stale} stale, ${c.extra} extra`);
-    steps.push(`stream: ${fmt(Number(stats.applied) + Number(stats.duplicates))} delivered, ${fmt(Number(stats.duplicates))} duplicates ignored`);
-
-    const problems = esMissing + esStale + esExtra + Number(c.missing) + Number(c.stale) + Number(c.extra);
-    const summary = `${fmt(sourceRows)} source / ${fmt(indexDocs)} index / ${fmt(Number(c.projected))} consumer`;
-    if (problems > 0 || indexDocs !== sourceRows) return fail(`${summary}, ${problems} mismatches`, steps);
-    return pass(`${summary} / 0 dupes, ${fmt(Number(stats.duplicates))} replays absorbed`, steps);
+    // 6. Every (id, version): source ↔ index and source ↔ consumer projection.
+    const c = await compareAll();
+    steps.push(...describe(c, fmt));
+    const summary = `${fmt(c.sourceRows)} source / ${fmt(c.indexDocs)} index / ${fmt(c.consumer.projected)} consumer`;
+    if (c.problems > 0) return fail(`${summary}, ${c.problems} mismatches`, steps);
+    return pass(`${summary} / 0 dupes, ${fmt(c.stream.duplicates)} replays absorbed`, steps);
   },
 };

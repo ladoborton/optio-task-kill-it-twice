@@ -28,9 +28,16 @@ export const kill = async (service: string) => docker('kill', await containerOf(
 export const stop = async (service: string) => docker('stop', await containerOf(service));
 export const start = async (service: string) => docker('start', await containerOf(service));
 
+/** One CPU sample of a service's container, in percent of one core (docker stats). */
+export async function cpuPercent(service: string): Promise<number> {
+  const out = await docker('stats', '--no-stream', '--format', '{{.CPUPerc}}', await containerOf(service));
+  return Number(out.replace('%', ''));
+}
+
 /** Parsed JSON log lines of a service since `sinceIso` (non-JSON lines are skipped). */
-export async function jsonLogsSince(service: string, sinceIso: string): Promise<Record<string, unknown>[]> {
-  const { stdout, stderr } = await run('docker', ['logs', '--since', sinceIso, await containerOf(service)], {
+export async function jsonLogsSince(service: string, sinceIso: string, untilIso?: string): Promise<Record<string, unknown>[]> {
+  const window = untilIso ? ['--until', untilIso] : [];
+  const { stdout, stderr } = await run('docker', ['logs', '--since', sinceIso, ...window, await containerOf(service)], {
     timeout: 60_000,
     maxBuffer: 64 * 1024 * 1024,
   });
