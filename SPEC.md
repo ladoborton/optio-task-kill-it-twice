@@ -8,6 +8,7 @@
 | v1.1    | 2026-09-24 | **Data access: TypeORM with hot-path rules (§5.6)** instead of the implied raw `pg`. Why: the first argument against an ORM (race in consumer dedup) was really about `repository.save()`, not TypeORM — QueryBuilder expresses the same atomic SQL. TypeORM gives the Nest-idiomatic structure (entities, migrations, DI) the team expects; the rules keep the critical SQL explicit. Added one-shot `migrate` service (§5.1) and single-gate verify runs (§11). |
 | v1.2    | 2026-09-28 | **Checkpoint writes are compare-and-set; seed stops the pipeline (§4.8, §6.2).** Why: v1 assumed the pipeline is the only writer of checkpoints — a reset during a batch would be overwritten and rows skipped (D-001). Also recorded: measured ES-only backfill ≈ 12k rec/s (1M in ~85 s), faster than the 2–5k estimate; volume stays 1M until the stream sink is added and re-measured. |
 | v1.3    | 2026-09-28 | **Incremental reads only finished transactions, in (txid, seq) order (§4.2, §4.3, §5.4).** Why: the v1 "skip a gap after 5 s" rule loses the change of any transaction open longer than 5 s (D-003, reproduced by hand; G2 now contains such a transaction). Also: consumer applies events in batches of ≤ 500 per transaction (§6.3, D-002); versioned deletes and `gc_deletes` (§5.5); G2 procedure (§11). Measured with the stream sink: backfill ≈ 7k rec/s (1M in ~2.4 min) — 1M stays. |
+| v1.4    | 2026-09-29 | **DLQ replay is requested in Postgres and performed by a pipeline loop; it targets only the rejecting sink (§4.4, §7.4). Batch order ES → DLQ → stream (§6.2).** Why: v1 did not say who performs a replay, how a request survives a crash, or what "the same sink path" means (D-004). |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -103,8 +104,10 @@ This keeps the outbox small and means a burst of 10 updates to one row doesn't n
 
 `id, sink ('es' | 'stream'), customer_id, version, payload JSONB, error_type, error_reason,
 stream ('backfill' | 'incremental'), batch_id, batch_position, attempts, status ('pending' | 'replayed' | 'failed'),
-created_at, last_attempt_at`.
-Enough context to understand the failure without logs and to replay it (§7.4).
+created_at, last_attempt_at, replay_requested_at` (v1.4).
+Enough context to understand the failure without logs and to replay it (§7.4). Only the index produces
+rows (`sink = 'es'`): the broker does not reject individual accepted messages, and the consumer's poison
+messages go to the RabbitMQ dead-letter queue (§7.3).
 
 ### 4.5 How a record can be "bad"
 
@@ -256,7 +259,7 @@ that is stated openly, and the consumer counts them.
 ### 6.2 Order of operations per batch (the core invariant)
 
 ```
-read batch → ES _bulk → classify items → RabbitMQ publish + wait for confirms → write DLQ rows → advance checkpoint
+read batch → ES _bulk → classify items → write DLQ rows → RabbitMQ publish + wait for confirms → advance checkpoint
 ```
 
 **The checkpoint moves only when every record of the batch is either acknowledged by each sink or durably
@@ -301,9 +304,12 @@ Stream sink: messages are published for all records the source produced; the con
 poison-message path — quorum queue with `x-delivery-limit` ⇒ dead-letter exchange ⇒ `consumer.customers.dlq`.
 
 ### 7.4 DLQ replay
-Replay (one, selected, or all `pending`) **re-reads the current source row** by `customer_id` — the usual
-fix is in the source data — and sends it through the same sink path. Success ⇒ `replayed`; failure ⇒
-`attempts++`, stays `pending`. Consumer DLQ messages can be shovelled back to the main queue from the UI.
+A replay is **requested** by setting `dlq_records.replay_requested_at` (api, UI, verify) and **carried out**
+by the pipeline's DLQ replay loop — the same desired-state-in-Postgres pattern as `pipeline_control`, so a
+request survives a crash (v1.4, D-004). The loop **re-reads the current source row** by `customer_id` — the
+usual fix is in the source data — and writes it to the sink that rejected it (the index only; a source fix
+reaches the stream through the incremental loop). Success ⇒ `replayed`; rejected again ⇒ `attempts++`,
+stays `pending`, latest reason kept. Consumer DLQ messages can be shovelled back to the main queue from the UI.
 
 ## 8. Observability (G5)
 
