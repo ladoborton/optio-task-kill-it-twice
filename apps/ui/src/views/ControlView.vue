@@ -14,14 +14,21 @@ interface DlqRow {
 
 const message = ref('');
 const failure = ref('');
+const busy = ref('');
+let clearTimer: number | undefined;
 async function run(label: string, action: () => Promise<unknown>) {
+  busy.value = label;
   failure.value = '';
+  window.clearTimeout(clearTimer);
   try {
     const r = await action();
-    message.value = `${label}${r && typeof r === 'object' ? ` — ${JSON.stringify(r)}` : ''}`;
+    message.value = `${label}${r && typeof r === 'object' ? ` — ${JSON.stringify(r)}` : ''}. The pipeline applies it on its next step.`;
+    clearTimer = window.setTimeout(() => (message.value = ''), 5_000);
     await refreshDlq();
   } catch (e) {
-    failure.value = `${label}: ${(e as Error).message}`;
+    failure.value = `${label} failed: ${(e as Error).message}`;
+  } finally {
+    busy.value = '';
   }
 }
 
@@ -43,83 +50,115 @@ const picked = ref<string[]>([]);
 
 const resetBackfill = () => {
   if (confirm('Start the backfill over from id 0? Documents already in the sinks are rewritten (idempotent).')) {
-    void run('backfill reset', () => api('/backfill/reset', { method: 'POST' }));
+    void run('Backfill reset', () => api('/backfill/reset', { method: 'POST' }));
   }
+};
+const replaySelected = () => {
+  const ids = picked.value;
+  picked.value = [];
+  void run(`Replay requested for ${ids.length} record(s)`, () => api('/dlq/replay', { method: 'POST', body: { ids } }));
 };
 </script>
 
 <template>
-  <div v-if="failure" class="notice error">{{ failure }}</div>
-  <div v-else-if="message" class="notice info">{{ message }}</div>
-
-  <div class="grid">
-    <section class="card">
-      <h3>Backfill</h3>
-      <p class="small">State: <span :class="['badge', status?.backfill.state ?? 'unknown']">{{ status?.backfill.state ?? '—' }}</span>
-        · {{ status?.backfill.percent ?? '—' }}%</p>
-      <div class="row">
-        <button @click="run('backfill paused', () => api('/backfill/pause', { method: 'POST' }))">Pause</button>
-        <button @click="run('backfill resumed', () => api('/backfill/resume', { method: 'POST' }))">Resume</button>
-        <button class="danger" @click="resetBackfill">Reset to 0</button>
-      </div>
-    </section>
-
-    <section class="card">
-      <h3>Incremental sync</h3>
-      <p class="small">State: <span :class="['badge', status?.incremental.state ?? 'unknown']">{{ status?.incremental.state ?? '—' }}</span>
-        · lag {{ n(status?.incremental.lag_events) }} events</p>
-      <div class="row">
-        <button @click="run('incremental paused', () => api('/incremental/pause', { method: 'POST' }))">Pause</button>
-        <button @click="run('incremental resumed', () => api('/incremental/resume', { method: 'POST' }))">Resume</button>
-      </div>
-    </section>
-
-    <section class="card">
-      <h3>Settings</h3>
-      <form class="row" @submit.prevent="run('settings saved', () => api('/settings', { method: 'PUT', body: { batch_size: batchSize, poll_interval_ms: pollMs } }))">
-        <label>batch size <input v-model.number="batchSize" type="number" min="1" max="10000" /></label>
-        <label>poll interval ms <input v-model.number="pollMs" type="number" min="100" max="60000" /></label>
-        <button class="primary">Save</button>
-      </form>
-      <p class="small muted">Applied by both loops from their next step.</p>
-    </section>
+  <div aria-live="polite">
+    <div v-if="failure" class="notice error" role="alert">{{ failure }}</div>
+    <div v-else-if="message" class="notice info">{{ message }}</div>
   </div>
 
-  <section class="card" style="margin-top: 12px">
-    <div class="row" style="justify-content: space-between">
-      <h2>Index DLQ <span class="small muted">— records Elasticsearch rejected, with the context to replay them</span></h2>
-      <div class="row">
-        <select v-model="dlqFilter"><option value="pending">pending</option><option value="all">all</option></select>
-        <button :disabled="!picked.length" @click="run(`replay requested for ${picked.length}`, () => api('/dlq/replay', { method: 'POST', body: { ids: picked } })); picked = []">Replay selected</button>
-        <button class="primary" :disabled="!status?.dlq.pending" @click="run('replay requested for all pending', () => api('/dlq/replay', { method: 'POST', body: {} }))">Replay all pending</button>
-      </div>
-    </div>
-    <p class="small muted">A replay re-reads the <em>current</em> source row — fix the data first (or the mapping), then replay. Still bad ⇒ stays pending, attempts +1.</p>
-    <div class="scroll">
-      <table>
-        <thead><tr><th></th><th>id</th><th>customer</th><th>v</th><th>status</th><th>attempts</th><th>error</th><th>batch</th></tr></thead>
-        <tbody>
-          <tr v-for="d in dlq ?? []" :key="d.id">
-            <td><input v-if="d.status === 'pending'" v-model="picked" type="checkbox" :value="d.id" /></td>
-            <td class="mono">{{ d.id }}</td>
-            <td class="mono">#{{ d.customer_id }}</td>
-            <td>{{ d.version }}</td>
-            <td><span :class="['badge', d.status]">{{ d.status }}</span><span v-if="d.replay_requested_at" class="small muted"> replay requested</span></td>
-            <td>{{ d.attempts }}</td>
-            <td class="small"><strong>{{ d.error_type }}</strong><br /><span class="muted">{{ d.error_reason }}</span></td>
-            <td class="small mono">{{ d.batch_id }} @{{ d.batch_position }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-if="dlq && !dlq.length" class="muted small">Nothing here.</p>
-    </div>
-  </section>
+  <div class="stack">
+    <div class="grid cols-3">
+      <section class="card">
+        <div class="card-head">
+          <h3>Backfill</h3>
+          <span :class="['badge', status?.backfill.state ?? 'neutral']">{{ status?.backfill.state ?? '—' }}</span>
+        </div>
+        <p class="small muted" style="margin: 0 0 12px">{{ status?.backfill.percent ?? '—' }}% · checkpoint id {{ n(status?.backfill.position) }}</p>
+        <div class="btn-group">
+          <button :disabled="!!busy" @click="run('Backfill paused', () => api('/backfill/pause', { method: 'POST' }))">Pause</button>
+          <button :disabled="!!busy" @click="run('Backfill resumed', () => api('/backfill/resume', { method: 'POST' }))">Resume</button>
+          <button class="danger" :disabled="!!busy" @click="resetBackfill">Reset to 0…</button>
+        </div>
+      </section>
 
-  <section class="card" style="margin-top: 12px">
-    <h2>Consumer dead-letter queue <span class="small muted">— RabbitMQ messages the consumer could not parse</span></h2>
-    <div class="row">
-      <span>{{ n(status?.consumer.dead_lettered) }} message(s)</span>
-      <button :disabled="!status?.consumer.dead_lettered" @click="run('consumer DLQ requeued', () => api('/consumer-dlq/requeue', { method: 'POST', body: {} }))">Requeue to the main queue</button>
+      <section class="card">
+        <div class="card-head">
+          <h3>Incremental sync</h3>
+          <span :class="['badge', status?.incremental.state ?? 'neutral']">{{ status?.incremental.state ?? '—' }}</span>
+        </div>
+        <p class="small muted" style="margin: 0 0 12px">lag {{ n(status?.incremental.lag_events) }} events · {{ status?.incremental.lag_seconds ?? '—' }} s</p>
+        <div class="btn-group">
+          <button :disabled="!!busy" @click="run('Incremental paused', () => api('/incremental/pause', { method: 'POST' }))">Pause</button>
+          <button :disabled="!!busy" @click="run('Incremental resumed', () => api('/incremental/resume', { method: 'POST' }))">Resume</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Settings</h3></div>
+        <form class="stack" @submit.prevent="run('Settings saved', () => api('/settings', { method: 'PUT', body: { batch_size: batchSize, poll_interval_ms: pollMs } }))">
+          <div class="row">
+            <label>batch size <input v-model.number="batchSize" type="number" min="1" max="10000" /></label>
+            <label>poll interval, ms <input v-model.number="pollMs" type="number" min="100" max="60000" /></label>
+          </div>
+          <div class="row between">
+            <span class="small muted">Both loops pick it up on their next step.</span>
+            <button class="primary" :disabled="!!busy">Save</button>
+          </div>
+        </form>
+      </section>
     </div>
-  </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2 style="margin-bottom: 2px">Index DLQ</h2>
+          <span class="small muted">Records Elasticsearch rejected, with the context to replay them.</span>
+        </div>
+        <div class="row">
+          <select v-model="dlqFilter" aria-label="Filter DLQ records"><option value="pending">pending</option><option value="all">all</option></select>
+          <button :disabled="!picked.length || !!busy" @click="replaySelected">Replay selected ({{ picked.length }})</button>
+          <button class="primary" :disabled="!status?.dlq.pending || !!busy" @click="run('Replay requested for all pending', () => api('/dlq/replay', { method: 'POST', body: {} }))">Replay all pending</button>
+        </div>
+      </div>
+      <p class="small muted" style="margin: 0 0 10px">A replay re-reads the <em>current</em> source row — fix the data first, then replay. Still bad ⇒ it stays pending with attempts + 1.</p>
+      <div class="table-wrap scroll">
+        <table>
+          <thead><tr><th><span class="sr-only">select</span></th><th class="num">id</th><th class="num">customer</th><th class="num">v</th><th>status</th><th class="num">attempts</th><th>error</th><th>batch · position</th></tr></thead>
+          <tbody>
+            <tr v-for="d in dlq ?? []" :key="d.id">
+              <td><input v-if="d.status === 'pending'" v-model="picked" type="checkbox" :value="d.id" :aria-label="`Select DLQ record ${d.id}`" /></td>
+              <td class="num mono">{{ d.id }}</td>
+              <td class="num mono">#{{ d.customer_id }}</td>
+              <td class="num">{{ d.version }}</td>
+              <td>
+                <span :class="['badge', d.status]">{{ d.status }}</span>
+                <div v-if="d.replay_requested_at" class="small muted">replay requested</div>
+              </td>
+              <td class="num">{{ d.attempts }}</td>
+              <td class="small"><strong>{{ d.error_type }}</strong><br /><span class="muted">{{ d.error_reason }}</span></td>
+              <td class="small mono">{{ d.batch_id }} · {{ d.batch_position }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="dlq && !dlq.length" class="empty">Nothing here — every record the index was given has been accepted.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2 style="margin-bottom: 2px">Consumer dead-letter queue</h2>
+          <span class="small muted">RabbitMQ messages the consumer could not parse.</span>
+        </div>
+        <div class="row">
+          <span :class="['badge', status?.consumer.dead_lettered ? 'pending' : 'ok']">{{ n(status?.consumer.dead_lettered) }} message(s)</span>
+          <button :disabled="!status?.consumer.dead_lettered || !!busy" @click="run('Consumer dead letters requeued', () => api('/consumer-dlq/requeue', { method: 'POST', body: {} }))">Requeue to the main queue</button>
+        </div>
+      </div>
+    </section>
+  </div>
 </template>
+
+<style scoped>
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>

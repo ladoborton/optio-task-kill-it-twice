@@ -20,26 +20,37 @@ const { data: status, error } = usePoll(() => api<Status>('/status'));
 
 <template>
   <header class="header">
-    <div class="page row" style="justify-content: space-between">
-      <div class="row">
-        <strong>Kill It Twice</strong>
-        <span class="muted small">Postgres → Elasticsearch + RabbitMQ</span>
+    <div class="page top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true" />
+        <div>
+          <strong>Kill It Twice</strong>
+          <div class="sub">Postgres → Elasticsearch + RabbitMQ · replication console</div>
+        </div>
       </div>
-      <div class="row">
+      <div class="health" aria-live="polite">
         <template v-if="status">
-          <span :class="['badge', status.health.status]">{{ status.health.status }}</span>
-          <span class="small muted">{{ status.health.reasons.join(' · ') || 'all good' }}</span>
+          <span :class="['badge', 'lg', status.health.status]">{{ status.health.status }}</span>
+          <span class="reasons">{{ status.health.reasons.join(' · ') || 'all systems nominal' }}</span>
         </template>
-        <span v-else-if="error" class="badge down">api unreachable</span>
+        <span v-else-if="error" class="badge lg down">api unreachable</span>
+        <span v-else class="badge lg neutral">connecting…</span>
       </div>
     </div>
-    <nav class="page row tabs">
-      <button v-for="t in tabs" :key="t.id" :class="{ active: tab === t.id }" @click="tab = t.id">{{ t.label }}</button>
+    <nav class="page tabs" role="tablist" aria-label="Console sections">
+      <button
+        v-for="t in tabs"
+        :key="t.id"
+        role="tab"
+        :aria-selected="tab === t.id"
+        :class="{ active: tab === t.id }"
+        @click="tab = t.id"
+      >{{ t.label }}</button>
     </nav>
   </header>
 
-  <main class="page">
-    <div v-if="error" class="notice error">api: {{ error }}</div>
+  <main class="page" role="tabpanel">
+    <div v-if="error" class="notice error" role="alert">Cannot reach the api: {{ error }}</div>
     <StatusView v-if="tab === 'status'" :status="status" />
     <RecordsView v-else-if="tab === 'records'" />
     <ControlView v-else-if="tab === 'control'" :status="status" />
@@ -48,11 +59,19 @@ const { data: status, error } = usePoll(() => api<Status>('/status'));
 </template>
 
 <style scoped>
-.header { background: #1c2330; color: #fff; }
-.header .page { padding-top: 10px; padding-bottom: 10px; }
-.header .muted { color: #aab2c3; }
-.tabs { padding-top: 0 !important; gap: 4px; }
-.tabs button { background: transparent; border: none; color: #aab2c3; border-radius: 6px 6px 0 0; }
-.tabs button.active { background: var(--bg); color: var(--text); }
-.tabs button:hover:not(.active) { color: #fff; }
+.header { background: var(--header); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding-bottom: 12px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand strong { font-size: 16px; letter-spacing: -0.01em; }
+.sub { color: var(--muted); font-size: 12px; }
+.mark { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #2563eb, #22c55e); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08) inset; }
+.health { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.reasons { color: var(--muted); font-size: 12.5px; max-width: 560px; }
+.tabs { display: flex; gap: 4px; padding-top: 0; padding-bottom: 0; }
+.tabs button {
+  background: transparent; border: none; border-radius: 0; color: var(--muted);
+  padding: 10px 14px; min-height: 40px; border-bottom: 2px solid transparent;
+}
+.tabs button:hover:not(.active) { color: var(--text); border-bottom-color: var(--line-strong); }
+.tabs button.active { color: #fff; border-bottom-color: var(--focus); }
 </style>
