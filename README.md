@@ -18,7 +18,7 @@ G5 observability ................. PASS (status, metrics and logs answer all fiv
 
 | File | What it is |
 |------|------------|
-| [`SPEC.md`](SPEC.md) | The specification the code was built from — committed **before** any code, then changed eight times (v1 → v1.8). Each change has a changelog row saying why; v1.7 synced the spec with the code before submission and closed its open questions, v1.8 came out of the clean-clone test. |
+| [`SPEC.md`](SPEC.md) | The specification the code was built from — committed **before** any code, then changed nine times (v1 → v1.9). Each change has a changelog row saying why; v1.7 synced the spec with the code before submission and closed its open questions, v1.8 came out of the clean-clone test, v1.9 records the UI polish. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for the coding agent: slices, invariants, what not to touch, how to check its own work. |
 | [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Every place the implementation departed from the SPEC, written when it happened (D-001 … D-009). |
 
@@ -356,7 +356,7 @@ sequential.
 | Auth on the api / UI; a safe simulation | The simulation stops containers through the Docker socket mounted into the api — dev only, stated in the code and UI. |
 | Prometheus / Grafana containers | The pipeline exposes `/metrics` in Prometheus format; wiring a scraper and dashboards added nothing to the gates. |
 | Push updates in the UI (SSE / WebSocket) | Polling every 2 s is enough for an operator console and survives restarts without reconnect logic. |
-| A component library / design system for the UI | The UI is an operator tool; the time went to gates and documentation. |
+| A component library for the UI | The UI is an operator tool; the time went to gates and documentation. Once every gate passed it got a CSS-only dark theme from colour tokens (no library, no logic change — SPEC v1.9). |
 | A linter | Strict TypeScript and unit tests for the pure logic are the checks (AGENTS.md). |
 
 ---
@@ -424,7 +424,7 @@ the clean-clone test (D-009).
 
 ## 10. How this was built
 
-- **SPEC first.** `SPEC.md` v1 was the first commit, before any code; it changed eight times, each with a
+- **SPEC first.** `SPEC.md` v1 was the first commit, before any code; it changed nine times, each with a
   changelog row and a reason (`git log --follow SPEC.md`).
 - **Gate first.** Each slice added its gate to `verify/` and committed it failing, then the feature
   (`test(verify): … (failing)` followed by `feat(…)`), except G3 (see §4).
@@ -436,7 +436,7 @@ the clean-clone test (D-009).
 | 09-28 | S2 · S3 · SPEC v1.2 | backfill + checkpoints (G1); RabbitMQ + consumer (G2); compare-and-set |
 | 09-29 | S4 · S5 · SPEC v1.3–1.4 | incremental from the outbox (xmin); DLQ + replay (G4) |
 | 09-30 | S6 · S7 · S8 · SPEC v1.5–1.6 | circuit breaker (G3); metrics, heartbeat, status (G5); api + UI |
-| 09-30 | review · SPEC v1.7 | pre-submission review: connection-leak fix (D-008), G3 stops the index mid-backfill, spec synced "as built" |
+| 09-30 | review · SPEC v1.7–1.9 | pre-submission review: connection-leak fix (D-008), G3 stops the index mid-backfill, spec synced "as built"; clean-clone test found a cold-build race (D-009); UI polish |
 
 ---
 
