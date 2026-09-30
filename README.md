@@ -6,20 +6,21 @@ continuous **incremental sync** run at the same time. The point of the project i
 break — and `./verify.sh` breaks them on purpose and counts.
 
 ```
-G1 resume after kill ............. PASS (killed at id 308,795 (301,500 docs indexed) / resumed at id 308,795, 0 lost)
-G2 no duplicates ................. PASS (1,001,978 source / 1,001,978 index / 1,001,978 consumer / 0 dupes, 44,185 replays absorbed)
-G3 sink outage ................... PASS (60s down, 0 lost, resumed in 0.5s, caught up in 18.1s)
+G1 resume after kill ............. PASS (killed at id 312,566 (302,000 docs indexed) / resumed at id 312,566, 0 lost)
+G2 no duplicates ................. PASS (1,003,187 source / 1,003,187 index / 1,003,187 consumer / 0 dupes, 62,125 replays absorbed)
+G3 sink outage ................... PASS (60s down at 30% of the backfill, 0 lost, resumed in 0.1s, caught up in 203.3s)
 G4 partial batch failure ......... PASS (497 written, 3 in DLQ, 3 replayed after fix)
 G5 observability ................. PASS (status, metrics and logs answer all five questions; health went down/degraded/ok as the system did)
 ```
+<sub>Last full run on the final code: exit code 0, ~16 min on a laptop.</sub>
 
 **Documents in this repository**
 
 | File | What it is |
 |------|------------|
-| [`SPEC.md`](SPEC.md) | The specification the code was built from — committed **before** any code, then changed six times (v1 → v1.6). Each change has a changelog row saying why. |
+| [`SPEC.md`](SPEC.md) | The specification the code was built from — committed **before** any code, then changed seven times (v1 → v1.7). Each change has a changelog row saying why; v1.7 synced the spec with the code before submission and closed its open questions. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for the coding agent: slices, invariants, what not to touch, how to check its own work. |
-| [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Every place the implementation departed from the SPEC, written when it happened (D-001 … D-007). |
+| [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Every place the implementation departed from the SPEC, written when it happened (D-001 … D-008). |
 
 ---
 
@@ -48,10 +49,16 @@ Nothing else is needed on the host — seed and verify run in containers. Free p
 ```bash
 docker compose up -d --build     # the whole system: postgres, elasticsearch, rabbitmq, migrate, pipeline, consumer, api, ui
 ./seed.sh                        # or: make seed   — 1,000,000 customers (~5 s), resets pipeline state
-./verify.sh                      # or: make verify — preflight + G1..G5 (~9 min), exit code 0 only if all pass
+./verify.sh                      # or: make verify — preflight + G1..G5 (~16 min), exit code 0 only if all pass
 ```
 
 - One gate: `./verify.sh G3` (or `make verify GATE=G3`); only the preflight: `./verify.sh preflight`.
+- Without a POSIX shell (plain PowerShell / cmd), the scripts are these `docker compose` calls:
+
+  ```bash
+  docker compose stop pipeline consumer && docker compose --profile tools run --rm -T --build seed && docker compose up -d pipeline consumer
+  docker compose --profile tools run --rm -T --build verify        # append G1 … G5 or preflight for one check
+  ```
 - **UI:** http://localhost:8080 — Status, Records, Control, Simulation.
 - **Status JSON:** http://localhost:3000/api/status · **Prometheus metrics:** http://localhost:9100/metrics
 - **RabbitMQ management:** http://localhost:15672 (optio / optio) · **Postgres:** `localhost:5433` (optio / optio)
@@ -133,7 +140,7 @@ sequenceDiagram
 | Service | Does | Notes |
 |---------|------|-------|
 | `migrate` | TypeORM migrations, then exits | the roles wait for it (`service_completed_successfully`) |
-| `pipeline` | backfill, incremental, DLQ replay loops; `/metrics`; heartbeat | `mem_limit: 256m`; no auto-restart — verify plays the orchestrator |
+| `pipeline` | backfill, incremental, DLQ replay loops; `/metrics`; heartbeat | `mem_limit: 256m`; no auto-restart — verify plays the orchestrator (in production an orchestrator or `restart: on-failure` would restart it; resuming is safe either way, it only reads its checkpoints) |
 | `consumer` | independent stream consumer with its own projection | separate process, separate failure domain |
 | `api` | `/api/status`, control, data, simulation | reads only durable state, so it reports a dead pipeline |
 | `ui` | Vue 3 console behind nginx (`/api` proxied) | polls every 2 s |
@@ -158,7 +165,7 @@ sequenceDiagram
     are new, the projection is updated only `WHERE version < new version`, counters are updated, then one
     `ack`. A redelivery after a crash between commit and ack is recognised and counted as a duplicate.
 - **What you do see:** the *stream itself* carries duplicate messages. G2 counts them — e.g.
-  `1,093,801 delivered, 44,185 duplicates ignored`. Most of those are not crashes: the backfill and the
+  `1,135,355 delivered, 62,125 duplicates ignored`. Most of those are not crashes: the backfill and the
   incremental loop legitimately both send a customer that changed while the backfill was running.
 - **Not guaranteed:** exactly-once delivery of messages; ordering across customers in the stream (order per
   customer is resolved by `version`, not by arrival); that the stream skips records the index rejected
@@ -176,11 +183,11 @@ Run with `./verify.sh`. Each gate sets up its own state, injects the failure, an
 
 | Gate | What `verify` does | PASS criteria | Result (last full run) |
 |------|--------------------|---------------|------------------------|
-| **G1** crash recovery | resets backfill into an empty index, waits for 30 %, `docker kill pipeline`, checks the checkpoint does not move while dead, `docker start` | resumes exactly from the checkpoint (read from its `backfill.started` log line — not 0, not beyond), and every source row ends up in the index | **PASS** — killed at id 308,795 with 301,500 docs indexed (the in-flight batch was in ES but not checkpointed); resumed at 308,795; 0 lost |
-| **G2** no duplicates | resets index, projection and queue; backfill + incremental under ~20k concurrent transactions (updates, multi-row updates, inserts, deletes) and one 8 s transaction on an already-backfilled row; kills pipeline at 25 % and 75 %, consumer at 50 % | after convergence: index and consumer projection equal the source for every id — 0 missing, 0 stale, 0 extra (deleted customers gone); count of stream duplicates reported | **PASS** — 1,001,978 / 1,001,978 / 1,001,978; 44,185 replays absorbed |
-| **G3** sink outage | after a finished backfill, stops Elasticsearch for 60 s while changes keep coming, then starts it | 0 lost; pipeline CPU ≤ 10 % during the outage; ≤ 40 failed requests; writing resumes ≤ 15 s after the index is healthy | **PASS** — CPU ~0.5 %, 13 failed requests, breaker opened 9×, writing resumed in 0.5–3.7 s, one-minute backlog drained in ~20 s |
-| **G4** partial batch | inserts 500 customers in one transaction, 3 with attributes the index mapping rejects | 497 indexed, exactly those 3 `pending` in the DLQ from one batch with reason and position; replay without a fix stays pending (attempts 2); fix + replay (incremental paused, so only the replay can deliver) ⇒ `replayed` and indexed | **PASS** |
-| **G5** observability | reads `/metrics` and `/api/status`; then stops the pipeline, stops the index under writes, parks a bad record | all metrics present; status matches Postgres (position, DLQ, consumer counts); health goes `down` (heartbeat), `degraded` (circuit open), `degraded` (DLQ pending) and back to `ok`; batch log lines structured | **PASS** — down in 10 s, degraded in 27 s (breaker needs 5 failures, a stopped container's DNS lookup takes ~4 s each), DLQ degraded in 1 s |
+| **G1** crash recovery | resets backfill into an empty index, waits for 30 %, `docker kill pipeline`, checks the checkpoint does not move while dead, `docker start` | resumes exactly from the checkpoint (read from its `backfill.started` log line — not 0, not beyond), and every source row ends up in the index | **PASS** — killed at id 312,566 with 302,000 docs indexed (ids of deleted customers are gaps, so ids run ahead of the doc count); resumed at 312,566; 1,002,918 / 1,002,918, 0 lost |
+| **G2** no duplicates | resets index, projection and queue; backfill + incremental under ~30k concurrent transactions (updates, multi-row updates, inserts, deletes) and one 8 s transaction on an already-backfilled row; kills pipeline at 25 % and 75 %, consumer at 50 % | after convergence: index and consumer projection equal the source for every id — 0 missing, 0 stale, 0 extra (deleted customers gone); count of stream duplicates reported | **PASS** — 1,003,187 / 1,003,187 / 1,003,187; 1,135,355 delivered, 62,125 replays absorbed; the slow transaction's change arrived (v3 = v3) |
+| **G3** sink outage | resets index, projection and queue; starts a backfill under change traffic; at 30 % of it stops Elasticsearch for 60 s, then starts it — both loops hit the dead sink "in the middle of the work" | the backfill checkpoint does not move while the index is down; 0 lost; pipeline CPU ≤ 10 % during the outage; ≤ 40 failed requests; writing resumes ≤ 15 s after the index is healthy | **PASS** — stopped at id 314,596, still 314,596 after 60 s; CPU avg 1.3 %; 17 failed requests, breaker opened 13×; writing resumed 0.1 s after recovery; backfill finished and both sinks converged 203 s later; 1,003,554 everywhere |
+| **G4** partial batch | inserts 500 customers in one transaction, 3 with attributes the index mapping rejects | 497 indexed, exactly those 3 `pending` in the DLQ from one batch with reason and position; replay without a fix stays pending (attempts 2); fix + replay (incremental paused, so only the replay can deliver) ⇒ `replayed` and indexed | **PASS** — 497 written, 3 × `document_parsing_exception` at positions 17, 250, 433; attempts 2 before the fix; 3 replayed after |
+| **G5** observability | reads `/metrics` and `/api/status`; then stops the pipeline, stops the index under writes, parks a bad record | all metrics present; status matches Postgres (position, DLQ, consumer counts); health goes `down` (heartbeat), `degraded` (circuit open), `degraded` (DLQ pending) and back to `ok`; batch log lines structured | **PASS** — down in 8 s, degraded in 26 s (the breaker needs 5 failures; a stopped container's DNS lookup takes ~4 s each), DLQ degraded in 1 s; 1,757 of 1,757 batch log lines well-formed |
 
 **Honest notes on the gates**
 
@@ -189,9 +196,15 @@ Run with `./verify.sh`. Each gate sets up its own state, injects the failure, an
   afterwards bounds the *worst case* (a loop could sleep up to 30 s after the sink returned) rather than
   improving a failing result — see D-005, including a wrong claim the agent made along the way.
 - **The bounds in G3 and G5 are chosen, not given.** "Recovers on its own" and "no busy loop" needed numbers
-  to be testable; they were set from measurements with margin, and are documented in the gate files.
-- **Timing.** A full `./verify.sh` takes ~9 minutes on a 22-core laptop; G1 and G2 each run a full
-  1M-row backfill.
+  to be testable; they were set from measurements with margin, and are documented in the gate files. The
+  CPU bound (average ≤ 10 % of one core) is the one most sensitive to the machine: measured averages were
+  1.3–3.2 % with single samples up to 9.8 % on a fast laptop; a busy loop pins ~100 %. On a much slower
+  machine that bound is the first thing to look at.
+- **G3 was strengthened after review.** Until the final review the outage hit only the incremental path after
+  a finished backfill; the assignment says the index stops "in the middle of the work", so it now stops at
+  30 % of a backfill and also asserts that the checkpoint does not move while the index is down.
+- **Timing.** A full `./verify.sh` takes ~16 minutes on a 22-core laptop (including the image build); G1, G2
+  and G3 each run a full 1M-row backfill.
 - **What verify does not test:** a RabbitMQ outage as a gate (tested by hand: restart during backfill → 0
   lost, see §8), `docker pause` (hung, not refused, connections), and more than one pipeline instance
   (guarded by compare-and-set, not exercised).
@@ -277,7 +290,7 @@ Run with `./verify.sh`. Each gate sets up its own state, injects the failure, an
 - **Alternatives.** Backoff only, 30 s cap (SPEC v1) — worked, but after a sink returned a loop could sleep
   up to 30 s, and every loop probed the sink on its own.
 - **Trade-offs.** The sink sees one request per 5 s while it is down, and writing resumes within about one
-  probe interval (measured 0.5–3.7 s). A breaker that opens on 5 failures also opens on a short blip.
+  probe interval (measured 0.1–3.7 s). A breaker that opens on 5 failures also opens on a short blip.
 
 ### ADR-8 One codebase, several processes; status from durable state only
 - **Decision.** One image, roles via `ROLE`; the api reads Postgres and the RabbitMQ management API only —
@@ -302,8 +315,9 @@ Measured on one laptop (Docker Desktop, 22 cores, 16 GB), 1M customers, batch 50
 | Backfill re-run over a full index (all `409`), batch 500 → 2000 | 5,300 → 6,200 rec/s (+17 %) |
 | Consumer | keeps pace with the pipeline (queue stays near empty); batches of ≤ 500 per transaction |
 | Pipeline memory | ~60 MB of the 256 MB limit |
-| Sink outage (60 s) | resume 0.5–3.7 s after the index is back, backlog of ~47k changes drained in ~20 s |
-| Full `./verify.sh` | ~9 min |
+| Sink outage (60 s), incremental only | writing resumed 0.5–3.7 s after the index was back; a backlog of ~47k changes drained in ~20 s |
+| Sink outage (60 s) at 30 % of a backfill, under traffic | writing resumed 0.1–0.5 s after recovery; the remaining 70 % plus the backlog converged in ~205 s |
+| Full `./verify.sh` | ~16 min including the image build (three full backfills: G1, G2, G3) |
 
 **Where the bottleneck is.** During backfill RabbitMQ runs at **80–106 % CPU (one core)**, Elasticsearch at
 7–11 %, the pipeline at 40–50 %, Postgres at 16–25 %. Adding the stream sink halved throughput
@@ -389,6 +403,16 @@ withdrawn before committing, the measurement was corrected (convergence = start 
 ~1 ms is 15–30 minutes of G2. *Fix:* the agent flagged it before implementing; the consumer applies groups of
 ≤ 500 in one transaction and acks once, with the same guarantee (nothing acked before commit).
 
+**6. A connection leak no gate could see (agent error → D-008).**
+*Task:* the pipeline's RabbitMQ publisher, written in S3. *What happened:* it connected lazily with
+"if there is no channel, connect" — an `await` between the check and the assignment. When backfill and
+incremental both had work at startup, each opened a connection and one was orphaned forever. No gate caught
+it (publisher confirms kept the data safe); the pre-submission code review did. *Steps:* reproduced by
+counting the pipeline's connections in the RabbitMQ management API after restarts under load (2 instead of 1
+in 2 of 3 runs), fixed with one shared connection attempt, re-measured (1 in 5 of 5). Lesson: a
+check-then-act across an `await` is a race even in single-threaded Node — and gates prove what they test,
+nothing more.
+
 Smaller ones, all in the log: a flag in the first backfill loop that would never have logged the resume point
 if the first step failed (caught in the agent's own review before commit); a reset racing a running pipeline
 (D-001); how DLQ replay is triggered (D-004); status built from durable state only (D-006).
@@ -397,7 +421,7 @@ if the first step failed (caught in the agent's own review before commit); a res
 
 ## 10. How this was built
 
-- **SPEC first.** `SPEC.md` v1 was the first commit, before any code; it changed six times, each with a
+- **SPEC first.** `SPEC.md` v1 was the first commit, before any code; it changed seven times, each with a
   changelog row and a reason (`git log --follow SPEC.md`).
 - **Gate first.** Each slice added its gate to `verify/` and committed it failing, then the feature
   (`test(verify): … (failing)` followed by `feat(…)`), except G3 (see §4).
@@ -409,6 +433,7 @@ if the first step failed (caught in the agent's own review before commit); a res
 | 09-28 | S2 · S3 · SPEC v1.2 | backfill + checkpoints (G1); RabbitMQ + consumer (G2); compare-and-set |
 | 09-29 | S4 · S5 · SPEC v1.3–1.4 | incremental from the outbox (xmin); DLQ + replay (G4) |
 | 09-30 | S6 · S7 · S8 · SPEC v1.5–1.6 | circuit breaker (G3); metrics, heartbeat, status (G5); api + UI |
+| 09-30 | review · SPEC v1.7 | pre-submission review: connection-leak fix (D-008), G3 stops the index mid-backfill, spec synced "as built" |
 
 ---
 
