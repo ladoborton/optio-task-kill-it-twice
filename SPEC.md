@@ -11,6 +11,7 @@
 | v1.4    | 2026-09-29 | **DLQ replay is requested in Postgres and performed by a pipeline loop; it targets only the rejecting sink (§4.4, §7.4). Batch order ES → DLQ → stream (§6.2).** Why: v1 did not say who performs a replay, how a request survives a crash, or what "the same sink path" means (D-004). |
 | v1.5    | 2026-09-29 | **Breaker open interval 5 s (was 15 s), backoff cap 5 s (was 30 s); concrete G3 bounds (§7.2, §11).** Why: the breaker's single probe protects a down sink, so long per-loop sleeps only delay recovery (D-005). Measured: writing resumes 0.6–3.7 s after the index is back; a one-minute backlog drains in ~20 s. |
 | v1.6    | 2026-09-30 | **`/api/status` reads only durable state; heartbeat carries breaker states (§4.7, §8.2).** Why: a status that asks the pipeline depends on the process whose death it must report (D-006). |
+| v1.7    | 2026-09-30 | **As built — the spec synced with the code before submission.** A pre-submission review found sections that had drifted without a changelog row: the §5.2 diagram still showed the pre-v1.3 `seq > checkpoint` reader; §8.1 listed two metrics that do not exist (`pipeline_outbox_gaps_skipped_total`, obsolete since D-003; `pipeline_sink_up`, never built) and defined lag and result labels differently from the code; §9/§10 named endpoints that were built differently (D-007); §4.5 named an ES 7 exception; §4.8 was still "tentative". Changed: those sections now describe what runs; G3 stops the index in the middle of a backfill (§11 — the assignment says "in the middle of the work"); every §14 question is closed with its answer; §2.1 records what was and was not built. Nothing in the design changed in this version. |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -41,6 +42,9 @@ records without losing or duplicating data, and must prove it with a single comm
 
 If time runs out, P2 goes first, then UI features — never the quality of an already-started gate.
 Three solid gates beat five half-working ones.
+
+**Outcome (v1.7):** all of P0 and P1 were built; none of P2 (README §8 explains each). A RabbitMQ restart
+was tested by hand instead of as a gate.
 
 ### 2.2 Out of scope (and why)
 
@@ -106,7 +110,8 @@ This keeps the outbox small and means a burst of 10 updates to one row doesn't n
 
 `id, sink ('es' | 'stream'), customer_id, version, payload JSONB, error_type, error_reason,
 stream ('backfill' | 'incremental'), batch_id, batch_position, attempts, status ('pending' | 'replayed' | 'failed'),
-created_at, last_attempt_at, replay_requested_at` (v1.4).
+created_at, last_attempt_at, replay_requested_at` (v1.4). `failed` is allowed by the schema but never set:
+a record that keeps failing stays `pending` with a growing `attempts` count (v1.7).
 Enough context to understand the failure without logs and to replay it (§7.4). Only the index produces
 rows (`sink = 'es'`): the broker does not reject individual accepted messages, and the consumer's poison
 messages go to the RabbitMQ dead-letter queue (§7.3).
@@ -115,8 +120,10 @@ messages go to the RabbitMQ dead-letter queue (§7.3).
 
 Postgres column types are strict, so the rejection has to come from the sink. ES mapping for `attributes` is
 `dynamic: strict` with typed fields (e.g. `attributes.age: integer`, `attributes.signup_channel: keyword`).
-A row with `attributes = {"age": "not-a-number"}` is valid in Postgres and rejected by ES with
-`mapper_parsing_exception` — a realistic "client sent garbage" case.
+A row with `attributes = {"age": "not-a-number"}` is valid in Postgres and rejected by ES 8 with
+`document_parsing_exception`; an unknown attribute (`{"favourite_colour": …}`) with
+`strict_dynamic_mapping_exception` — realistic "client sent garbage" cases. (v1 named the ES 7
+`mapper_parsing_exception`; corrected in v1.7.)
 
 ### 4.6 `pipeline_control`
 
@@ -131,7 +138,7 @@ Pipeline writes `(instance_id, started_at, last_beat_at, backfill_rate, incremen
 2 s; `details` holds each sink's breaker state (v1.6). Lets the API report "pipeline is dead" and last
 known throughput and breaker states even while the pipeline is down.
 
-### 4.8 Data volume: 1,000,000 customers (tentative)
+### 4.8 Data volume: 1,000,000 customers
 
 - **Why not less:** at ~100k the backfill finishes in seconds — `verify` cannot reliably kill it mid-run,
   and "load everything into memory" still works.
@@ -140,59 +147,73 @@ known throughput and breaker states even while the pipeline is down.
 - **Making "load it all into memory" impossible on purpose:** 1M rows as JS objects is roughly ~1 GB of V8
   heap. The pipeline container gets `mem_limit: 256m`, so any accidental "read all rows" implementation
   crashes instead of silently working.
-- Expected backfill throughput 2–5k rec/s → 3–8 min backfill. **To be measured**; if far off, the number
-  changes in v2 with the measurement as the reason.
+- Expected backfill throughput 2–5k rec/s → 3–8 min backfill. **Measured** (v1.2, v1.3): ~12k rec/s
+  index-only, ~7k rec/s with the stream sink — 1M in ~2.4 min. The number stayed at 1M: the kill points of
+  G1–G3 still fall well inside the backfill, and a full `verify` takes ~13 min (v1.7).
 - Seed uses `generate_series` in SQL (seconds, not minutes) and **bypasses the outbox trigger**
   (`session_replication_role = replica`): initial data is the backfill's job, not the incremental's.
-- Seed resets checkpoints and deletes the index, so `seed.sh` **stops the pipeline first** and starts it
-  afterwards. Elasticsearch runs with `action.auto_create_index=false`: a write into a deleted index fails
+- Seed resets checkpoints, deletes the index, truncates the consumer's projection and dedup record and
+  purges its queue (all of them hold versions of the old data), so `seed.sh` **stops the pipeline and the
+  consumer first** and starts them afterwards (D-001). Elasticsearch runs with `action.auto_create_index=false`: a write into a deleted index fails
   instead of recreating it without the strict mapping; only the pipeline creates the index.
 
 ## 5. Architecture
 
 ### 5.1 Components
 
-One NestJS codebase (`apps/server`), one Docker image, started in three roles via `ROLE`:
+One NestJS codebase (`apps/server`), one Docker image, started in three long-running roles via `ROLE`
+(plus the one-shot `migrate` and `seed`):
 
 | Service    | Role | Why separate |
 |------------|------|--------------|
-| `pipeline` | backfill loop + incremental loop, `/metrics` | the thing `verify` kills; must not take the API down with it |
+| `pipeline` | backfill, incremental and DLQ-replay loops; `/metrics` on :9100; heartbeat every 2 s | the thing `verify` kills; must not take the API down with it. No auto-restart: `verify` plays the orchestrator |
 | `consumer` | independent RabbitMQ consumer with its own projection | assignment requires an independent consumer |
-| `api`      | REST for UI and verify, status aggregation, control, simulation | stays up while pipeline is killed, so recovery is observable |
-| `migrate`  | one-shot: runs TypeORM migrations, then exits | the three roles start in parallel; only one process may migrate. Others `depends_on: service_completed_successfully` |
-| `ui`       | Vue 3 SPA, served by nginx | |
+| `api`      | :3000 — status, control, data, simulation (§9) | stays up while pipeline is killed, so recovery is observable |
+| `migrate`  | one-shot: runs TypeORM migrations, then exits | the roles start in parallel; only one process may migrate. Others `depends_on: service_completed_successfully` |
+| `ui`       | Vue 3 SPA served by nginx on :8080, which proxies `/api` to the api | one origin, no CORS (D-007) |
+| `seed`, `verify` | one-shot tools (`--profile tools`); verify drives Docker through the mounted socket | |
 | `postgres`, `elasticsearch`, `rabbitmq` | infrastructure | |
 
 ### 5.2 Diagram
 
+v1.7: redrawn as built (v1's diagram still showed the pre-v1.3 `seq > checkpoint` reader and an api
+reading the pipeline). The same diagram is in the README.
+
 ```mermaid
-flowchart LR
-  subgraph Source[Postgres]
-    C[(customers)] -- trigger --> O[(customer_changes<br/>outbox)]
-    CP[(pipeline_checkpoints)]
-    DLQ[(dlq_records)]
-    CTL[(pipeline_control)]
+flowchart TB
+  subgraph SRC["Postgres — source"]
+    C[(customers)] -- "trigger, same transaction" --> O[("customer_changes<br/>(outbox)")]
   end
 
-  subgraph P[pipeline]
-    BF[Backfill loop<br/>keyset by id]
-    INC[Incremental loop<br/>seq > checkpoint]
+  subgraph P["pipeline process"]
+    BF["Backfill loop<br/>pages where id > checkpoint ①"]
+    INC["Incremental loop<br/>outbox rows after checkpoint ②,<br/>finished transactions only"]
+    BD{{"BatchDelivery"}}
   end
 
-  C -- batches of 500 --> BF
-  O -- batches --> INC
-  BF & INC -- bulk upsert, external version --> ES[(Elasticsearch)]
-  BF & INC -- publish + confirms --> X{{RabbitMQ<br/>exchange customers}}
-  BF & INC -- rejected items --> DLQ
-  BF & INC -- after both sinks ack --> CP
-  CTL -. desired state .-> P
+  C --> BF
+  O --> INC
+  BF --> BD
+  INC --> BD
 
-  X --> Q[[quorum queue<br/>consumer.customers]] --> CON[consumer]
-  Q -- delivery limit exceeded --> QD[[consumer.customers.dlq]]
+  BD -- "1 · _bulk, external version<br/>(circuit breaker)" --> ES[("Elasticsearch<br/>customers index")]
+  BD -- "2 · rejected items" --> DLQ[("dlq_records<br/>index DLQ · Postgres")]
+  BD -- "3 · publish + confirms<br/>(circuit breaker)" --> X{{"RabbitMQ<br/>exchange: customers"}}
+  BD -. "4 · only then:<br/>compare-and-set" .-> CP[("pipeline_checkpoints · Postgres<br/>① backfill: last id<br/>② incremental: last txid, seq")]
 
-  API[api] --> Source & ES & P
-  UI[ui] --> API
+  DLQ -- "replay requested" --> RP["DLQ replay loop<br/>(pipeline process)"]
+  RP -- "current row, re-index" --> ES
+
+  X --> Q[["quorum queue<br/>consumer.customers"]]
+  Q -- "malformed / delivery limit" --> QD[["consumer.customers.dlq<br/>stream DLQ"]]
+  Q --> CS["consumer<br/>batch transaction, ack after commit"]
+  CS --> PROJ[("projection + dedup<br/>consumer.* · Postgres")]
+
+  UI["ui :8080"] --> API["api :3000<br/>reads durable state only"]
 ```
+
+Not drawn: `pipeline_control` (read by every loop step), `pipeline_heartbeat` (written every 2 s), the
+api's reads (Postgres and the RabbitMQ management API only), and `verify`.
 
 ### 5.3 Backfill path
 
@@ -277,8 +298,9 @@ the old position and skip rows.
 ### 6.3 Idempotency per sink
 
 - **ES:** `_id = customer id`, external version. Replays are no-ops (409 → success).
-- **RabbitMQ:** message carries `customer_id`, `version`, `op`, `source` (`backfill`|`incremental`),
-  `message_id = "{id}:{version}"`. Durable exchange, persistent messages, publisher confirms.
+- **RabbitMQ:** message carries `customer_id`, `version`, `op`, `source` (`backfill`|`incremental`), `data`
+  (the current row for upserts, `null` for deletes) and `emitted_at`; `message_id = "{id}:{version}"`; routing
+  key `customer.upserted` / `customer.deleted`. Durable exchange, persistent messages, publisher confirms.
 - **Consumer:** manual ack; messages are grouped (≤ 500 or 50 ms, D-002) and each group is applied in
   **one Postgres transaction**: insert into `consumer.applied_events(customer_id, version)` with
   `ON CONFLICT DO NOTHING RETURNING` (PK ⇒ duplicate detected), upsert `consumer.customers(id, version,
@@ -300,14 +322,17 @@ continues. The last partially-written batch is re-sent (≤ `batch_size` records
   sleeps, protects a down sink, and long sleeps only delay recovery.
 - While a sink is down the affected loop **waits** (no busy loop, checkpoint does not move, nothing is read
   ahead). Breaker state is exported as a metric and shown in health.
-- Classification of ES bulk item errors: `409` → success; `429`, `5xx`, timeouts → retry; `400`
-  (`mapper_parsing_exception`, `illegal_argument_exception`) → permanent → DLQ.
+- Classification of ES bulk item errors: `409` → success; `404 not_found` on a delete → success (already
+  absent); `429`, `5xx`, timeouts → retry the whole batch; `index_not_found` → recreate the index, retry;
+  any other `400` (in ES 8: `document_parsing_exception`, `strict_dynamic_mapping_exception`) → permanent → DLQ.
 
 ### 7.3 Partial batch failure (G4)
 ES `_bulk` returns one result per item. Permanent failures (e.g. 3 of 500) go to `dlq_records` with full
 context; the other 497 count as written; the batch is **not** rolled back or retried as a whole.
 Stream sink: messages are published for all records the source produced; the consumer side has its own
 poison-message path — quorum queue with `x-delivery-limit` ⇒ dead-letter exchange ⇒ `consumer.customers.dlq`.
+A message the consumer cannot parse is dead-lettered at once (`nack`, no requeue); the delivery limit catches
+messages that crash the consumer repeatedly.
 
 ### 7.4 DLQ replay
 A replay is **requested** by setting `dlq_records.replay_requested_at` (api, UI, verify) and **carried out**
@@ -319,18 +344,26 @@ stays `pending`, latest reason kept. Consumer DLQ messages can be shovelled back
 
 ## 8. Observability (G5)
 
-### 8.1 Metrics (`GET /metrics` on pipeline, Prometheus text format)
+### 8.1 Metrics (`GET /metrics` on pipeline :9100, Prometheus text format)
+
+As built (v1.7). Counters are per process and restart at 0; the durable answers (positions, lag, DLQ) are
+gauges refreshed by the heartbeat from Postgres. Every known label set is exported from start-up with 0.
+
 | Metric | Type | Meaning |
 |--------|------|---------|
-| `pipeline_records_total{stream,sink,result}` | counter | result = written \| conflict \| dlq \| retried |
-| `pipeline_batch_duration_seconds{stream}` | histogram | |
-| `pipeline_checkpoint_position{stream}` | gauge | |
-| `pipeline_backfill_total_rows` | gauge | `max(id)` at backfill start |
-| `pipeline_incremental_lag_events` | gauge | `max(seq) - checkpoint` |
-| `pipeline_incremental_lag_seconds` | gauge | age of the oldest unprocessed outbox row |
-| `pipeline_sink_up{sink}` / `pipeline_circuit_state{sink}` | gauge | |
-| `pipeline_dlq_pending{sink}` | gauge | |
-| `pipeline_outbox_gaps_skipped_total` | counter | see §5.4 |
+| `pipeline_records_total{stream,sink,result}` | counter | `sink="es"`: `written` \| `absent` (delete of a missing doc) \| `conflict` (409) \| `dlq`; `sink="stream"`: `published` |
+| `pipeline_batch_duration_seconds{stream}` | histogram | read + both sinks + checkpoint, per batch |
+| `pipeline_checkpoint_position{stream}` | gauge | backfill: last customer id; incremental: last outbox seq |
+| `pipeline_backfill_total_rows` | gauge | current `max(customers.id)` — where the backfill ends |
+| `pipeline_throughput_records_per_second{stream}` | gauge | records per second over the last 10 s |
+| `pipeline_incremental_lag_events` | gauge | outbox rows beyond the `(txid, seq)` checkpoint (v1 said `max(seq) - checkpoint`, which the (txid, seq) order of v1.3 made meaningless) |
+| `pipeline_incremental_lag_seconds` | gauge | age of the oldest outbox row beyond the checkpoint |
+| `pipeline_circuit_state{sink}` | gauge | 0 closed, 1 half-open, 2 open |
+| `pipeline_dlq_pending` | gauge | DLQ records waiting for a replay (index only, §4.4) |
+| process defaults | — | CPU, memory, event-loop lag (prom-client) |
+
+Removed from v1's list: `pipeline_outbox_gaps_skipped_total` (no gaps are skipped since D-003) and
+`pipeline_sink_up` (the circuit state says the same, and "up" is only known when a request is made).
 
 ### 8.2 `GET /api/status` (api service)
 Built **only** from durable sources — Postgres (checkpoints, heartbeat, DLQ, outbox, consumer counters) and
@@ -343,7 +376,9 @@ consumer stats, overall health.
 - `down`: pipeline heartbeat older than 10 s.
 - `degraded`: any circuit open, or incremental lag > 30 s, or pending DLQ > 0.
 - `ok`: otherwise.
-Each non-ok status lists its reasons (e.g. `"elasticsearch circuit open for 42s"`).
+Each non-ok status lists its reasons, e.g. `"pipeline heartbeat 14s old"`, `"elasticsearch circuit open"`,
+`"3 DLQ record(s) pending replay"`, `"incremental lag 42s (1200 events)"`. The consumer's RabbitMQ dead-letter
+queue is reported but does not degrade health (D-006).
 
 ### 8.4 Logs
 Structured JSON lines: `ts, level, role, stream, batch_id, event, …`. One line per batch (size, duration,
@@ -351,23 +386,37 @@ written/dlq/conflicts), one per state change (breaker opened, backfill completed
 
 ## 9. API
 
-**Control:** `POST /api/backfill/{start|pause|resume|reset}`, `POST /api/incremental/{pause|resume}`,
-`PUT /api/settings {batch_size, poll_interval_ms}`, `POST /api/dlq/replay {ids? | all}`.
+As built (v1.7; differences from v1 in D-007). Every control action only writes desired state to Postgres;
+the pipeline applies it on its next step, so it works — and persists — while the pipeline is down.
+
+**Status:** `GET /api/status` (§8.2).
+
+**Control:** `POST /api/backfill/{pause|resume|reset}` (v1's `start` is `resume`; a completed backfill is
+started again with `reset`), `POST /api/incremental/{pause|resume}`,
+`PUT /api/settings {batch_size, poll_interval_ms}`.
+
+**DLQ:** `GET /api/dlq?status=pending|all&limit=`, `POST /api/dlq/replay {ids?}` (omitted = all pending),
+`POST /api/consumer-dlq/requeue {limit?}` (moves the consumer's dead letters back to the main exchange).
 
 **Data:** `GET /api/customers?q=&segment=&city=&page=` (from ES), `GET /api/customers/:id` (source row +
-ES doc + consumer projection side by side), `GET /api/changes?after=` (recent outbox entries for the live view),
-`GET /api/dlq`.
+ES doc + consumer projection + DLQ entries side by side), `GET /api/changes?limit=` (latest outbox entries,
+each marked shipped or waiting relative to the incremental checkpoint).
 
-**Simulation:** `POST /api/sim/sinks/:name/{stop|start}` (Docker API via mounted socket — dev-only,
-documented as such), `POST /api/sim/bad-records {count}`, `POST /api/sim/changes {rate, duration}`.
+**Simulation:** `GET /api/sim/services`, `POST /api/sim/services/:service/{stop|start|kill}` for
+`elasticsearch`, `rabbitmq`, `pipeline`, `consumer` (Docker API via the mounted socket — dev-only, documented
+as such; `kill` = SIGKILL), `POST /api/sim/bad-records {count}`,
+`POST /api/sim/changes {updates, inserts, deletes}` (v1 had `{rate, duration}`; a one-shot burst is simpler
+to reason about).
 
 ## 10. UI (Vue 3, polling every 2 s)
 
 1. **Status** — backfill progress bar, throughput, lag, DLQ counts, sink/breaker states, health + reasons.
 2. **Records** — search/filter list from ES, detail view comparing source / index / consumer, live list of
    recent changes.
-3. **Control** — backfill start/pause/resume/reset, incremental pause/resume, settings, DLQ table + replay.
-4. **Simulation** — stop/start ES and RabbitMQ, inject N bad records, generate change traffic.
+3. **Control** — backfill pause/resume/reset, incremental pause/resume, settings, DLQ table + replay, consumer
+   dead-letter requeue.
+4. **Simulation** — stop/start ES and RabbitMQ, stop/start/kill the pipeline and the consumer, inject N bad
+   records, generate a burst of changes.
 
 Plain functional UI; no design system work.
 
@@ -381,9 +430,9 @@ Gates run in order on the same dataset; a failed gate prints `FAIL (reason)` and
 |------|-----------|-----------|
 | G1 | Reset backfill; wait until checkpoint ≥ 30%; `docker kill pipeline`; record checkpoint; `docker start pipeline` | first post-restart batch starts at the saved checkpoint (from logs/metrics, not from 0) and backfill completes |
 | G2 | Reset index, projection, queue; backfill from 0, incremental from the outbox end. During the run: change traffic (updates, multi-row updates, inserts, deletes) and one 8 s transaction on an already-backfilled customer; kill pipeline at 25 % and 75 %, consumer at 50 %. Wait for backfill completed, incremental lag = 0, queue drained | ES doc count = source count; full comparison of `(id, version)` source vs ES (page by page) and source vs consumer projection (SQL join): 0 missing, 0 stale, 0 extra (deleted customers gone); report stream deliveries vs duplicates absorbed |
-| G3 | After a finished backfill, during change traffic, stop ES for 60 s, then start | 0 lost (as G2 comparison); pipeline CPU during the outage ≤ 10 % (sampled with `docker stats`); ≤ 40 failed requests during the outage; writing resumes ≤ 15 s after the index is healthy; time to drain the backlog reported |
-| G4 | Wait for idle; set batch_size 500; insert 500 rows in one transaction, 3 with bad `attributes` | 497 in ES, 3 `pending` in `dlq_records` with the same `batch_id` and error reason; then fix source + replay ⇒ 3 `replayed` |
-| G5 | Query `/metrics` and `/api/status` | all fields of §8.2 present and consistent with what G1–G4 just did (e.g. DLQ count matches G4) |
+| G3 | Reset index, projection, queue; backfill from 0 under change traffic; at 30 % of the backfill stop ES for 60 s, then start (v1.7: "in the middle of the work" — before, the outage hit only the incremental path after a finished backfill) | the backfill checkpoint does not move while the index is down; 0 lost (as G2 comparison); pipeline CPU during the outage ≤ 10 % (sampled with `docker stats`); ≤ 40 failed requests during the outage; writing resumes ≤ 15 s after the index is healthy; time to finish and converge reported |
+| G4 | Wait for idle; set batch_size 500; insert 500 rows in one transaction, 3 with bad `attributes` | 497 in ES, 3 `pending` in `dlq_records` with the same `batch_id` and error reason; replay without a fix stays pending (attempts 2); fix the source with incremental paused + replay ⇒ 3 `replayed` and indexed (only the replay can have delivered them) |
+| G5 | Query `/metrics` and `/api/status`; then stop the pipeline, stop the index under writes, insert a bad record | all §8.1 metrics present; §8.2 fields consistent with Postgres (backfill position, DLQ counts, consumer counters; lag 0 and health `ok` when converged); health turns `down` (heartbeat), `degraded` (circuit), `degraded` (DLQ) and back to `ok`; batch log lines are structured JSON |
 
 Exit code non-zero if any gate fails. `./verify.sh G1` runs a single gate (used while building a slice:
 the gate is added first and must FAIL before the feature exists, then PASS).
@@ -391,15 +440,15 @@ the gate is added first and must FAIL before the feature exists, then PASS).
 ## 12. Repo layout & commands
 
 ```
-apps/server/        NestJS; src/roles/{pipeline,consumer,api}, src/shared,
+apps/server/        NestJS; src/roles/{pipeline,consumer,api}, src/tools/{migrate,seed}, src/shared,
                     src/database/{entities,migrations}
-apps/ui/            Vue 3 + Vite
-verify/             verify runner (container)
+apps/ui/            Vue 3 + Vite, Dockerfile + nginx.conf
+verify/             verify runner (container): checks/preflight, gates/g1..g5, lib/
 docs/DEVIATIONS.md  running log of spec deviations
 docker-compose.yml  Makefile  seed.sh  verify.sh
 SPEC.md  AGENTS.md  README.md
 ```
-npm workspaces for `apps/*`.
+npm workspaces: `apps/server`, `apps/ui`, `verify`.
 
 ## 13. Decisions made (→ ADRs in README)
 
@@ -413,18 +462,29 @@ npm workspaces for `apps/*`.
 6. **ES external versioning** resolves backfill/incremental races without locks.
 7. **TypeORM with hot-path rules** (§5.6) over raw `pg` (loses Nest-idiomatic structure and migrations)
    and over "plain TypeORM" (`save()` in the consumer would reintroduce the dedup race).
+8. **Incremental reads finished transactions in (txid, seq) order** (v1.3, D-003) over trusting `seq`.
+9. **A circuit breaker per sink and a 5 s backoff cap** (v1.5, D-005) over long per-loop backoff.
+10. **Status from durable state only** (v1.6, D-006) over asking the pipeline process.
 
-## 14. Open questions
+The README merges these into eight ADRs.
 
-1. ~~**Outbox gap handling**~~ — resolved in v1.3 (xmin-based reading, D-003). Original question:
-   is "wait up to 5 s then skip" safe enough, or use
-   `pg_current_snapshot()` / xmin-based visibility instead? Decide after building a test that forces it.
-2. **Volume**: 1M is a guess; measure backfill throughput and verify runtime, then fix the number.
-3. **G3 fault type**: `docker stop` (connection refused) vs `docker pause` (hanging connections — tests
-   timeouts). Possibly both.
-4. **verify implementation language**: TypeScript (shares clients/types with server) vs bash (closer to
-   the "docker kill" story). Leaning TypeScript.
-5. **Single pipeline process for both loops**: simpler and makes G1 stricter; revisit if one loop starving
-   the other shows up in measurements.
-6. **Stream sink and ES-rejected records**: v1 publishes all records to the stream even if ES rejects them
-   (sinks are independent). Is that what a downstream consumer expects?
+## 14. Open questions — all closed (v1.7)
+
+Each question as asked in v1, and how it was answered.
+
+1. **Outbox gap handling** — is "wait up to 5 s then skip" safe enough, or use xmin-based visibility?
+   *Answer (v1.3, D-003):* not safe — a test forcing it (an 8 s transaction on an already-backfilled row) is
+   part of G2; the incremental loop reads only finished transactions in (txid, seq) order.
+2. **Volume** — 1M is a guess; measure, then fix the number.
+   *Answer:* measured 7k rec/s with both sinks, 1M in ~2.4 min; 1M kept (§4.8).
+3. **G3 fault type** — `docker stop` vs `docker pause`?
+   *Answer:* `docker stop` only (refused connections). `docker pause` (hung connections) is not a gate; the
+   timeouts that would handle it are configured but untested — stated in the README.
+4. **verify implementation language** — TypeScript or bash?
+   *Answer:* TypeScript, run in a container with the Docker CLI, so the host needs nothing but Docker.
+5. **Single pipeline process for both loops** — revisit if one loop starves the other.
+   *Answer:* kept; the process now runs three loops (backfill, incremental, DLQ replay). No starvation seen:
+   G2 and G3 run backfill and incremental together under traffic and both converge.
+6. **Stream sink and ES-rejected records** — publish records the index rejected?
+   *Answer (v1.4, D-004):* yes; the sinks are independent, and the consumer applies what the index mapping
+   refused. Only the index DLQ holds them for replay.
