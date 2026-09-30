@@ -66,44 +66,42 @@ on any state of the system, repeatedly.
 ## 2. Architecture
 
 ```mermaid
-flowchart LR
-  subgraph PG[Postgres]
-    C[(customers)] -- "trigger, same tx" --> O[(customer_changes<br/>outbox: txid, seq)]
-    CP[(pipeline_checkpoints<br/>① backfill id<br/>② incremental txid,seq)]
-    CTL[(pipeline_control<br/>desired state)]
-    DLQ[(dlq_records)]
-    HB[(pipeline_heartbeat)]
-    CON[(consumer.*<br/>projection + dedup)]
+flowchart TB
+  subgraph SRC["Postgres — source"]
+    C[(customers)] -- "trigger, same transaction" --> O[("customer_changes<br/>(outbox)")]
   end
 
-  subgraph P[pipeline process]
-    BF[Backfill loop<br/>keyset pages by id]
-    INC[Incremental loop<br/>finished tx only]
-    RP[DLQ replay loop]
-    BD{{BatchDelivery}}
-    BR1[/ES breaker/]
-    BR2[/RabbitMQ breaker/]
+  subgraph P["pipeline process"]
+    BF["Backfill loop<br/>pages where id > checkpoint ①"]
+    INC["Incremental loop<br/>outbox rows after checkpoint ②,<br/>finished transactions only"]
+    BD{{"BatchDelivery"}}
   end
 
-  C -- "id > checkpoint" --> BF
-  O -- "(txid,seq) > checkpoint<br/>txid #lt; xmin" --> INC
-  BF & INC --> BD
-  BD -- "1 _bulk, external version" --> BR1 --> ES[(Elasticsearch<br/>customers index)]
-  BD -- "2 rejected items" --> DLQ
-  BD -- "3 publish + confirms" --> BR2 --> X{{RabbitMQ<br/>exchange customers}}
-  BD -. "4 only then:<br/>compare-and-set checkpoint" .-> CP
-  DLQ -- "replay requested" --> RP --> BR1
-  CTL -. read every step .-> P
-  P -. every 2 s .-> HB
+  C --> BF
+  O --> INC
+  BF --> BD
+  INC --> BD
 
-  X --> Q[[quorum queue<br/>consumer.customers]] --> CS[consumer<br/>batch tx, ack after commit] --> CON
-  Q -- "delivery limit / malformed" --> QD[[consumer.customers.dlq]]
+  BD -- "1 · _bulk, external version<br/>(circuit breaker)" --> ES[("Elasticsearch<br/>customers index")]
+  BD -- "2 · rejected items" --> DLQ[("dlq_records<br/>index DLQ · Postgres")]
+  BD -- "3 · publish + confirms<br/>(circuit breaker)" --> X{{"RabbitMQ<br/>exchange: customers"}}
+  BD -. "4 · only then:<br/>compare-and-set" .-> CP[("pipeline_checkpoints · Postgres<br/>① backfill: last id<br/>② incremental: last txid, seq")]
 
-  API[api :3000] -- reads --> PG
-  API -- queue stats --> X
-  UI[ui :8080] --> API
-  V[verify] -- "docker kill / stop" --> P & ES & CS
+  DLQ -- "replay requested" --> RP["DLQ replay loop<br/>(pipeline process)"]
+  RP -- "current row, re-index" --> ES
+
+  X --> Q[["quorum queue<br/>consumer.customers"]]
+  Q -- "malformed / delivery limit" --> QD[["consumer.customers.dlq<br/>stream DLQ"]]
+  Q --> CS["consumer<br/>batch transaction, ack after commit"]
+  CS --> PROJ[("projection + dedup<br/>consumer.* · Postgres")]
+
+  UI["ui :8080"] --> API["api :3000<br/>reads durable state only"]
 ```
+
+Not drawn, to keep the picture readable: `pipeline_control` (desired state, read by every loop step);
+`pipeline_heartbeat` (written every 2 s); the api's reads (Postgres and the RabbitMQ management API — never
+the pipeline process); and `verify`, which kills and stops `pipeline`, `consumer` and `elasticsearch`
+through the Docker socket.
 
 **Where state lives.** Every piece of progress and every control decision is in Postgres:
 checkpoints, desired state (pause/resume/settings), DLQ records and replay requests, heartbeat, the
