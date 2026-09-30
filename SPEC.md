@@ -12,6 +12,7 @@
 | v1.5    | 2026-09-29 | **Breaker open interval 5 s (was 15 s), backoff cap 5 s (was 30 s); concrete G3 bounds (§7.2, §11).** Why: the breaker's single probe protects a down sink, so long per-loop sleeps only delay recovery (D-005). Measured: writing resumes 0.6–3.7 s after the index is back; a one-minute backlog drains in ~20 s. |
 | v1.6    | 2026-09-30 | **`/api/status` reads only durable state; heartbeat carries breaker states (§4.7, §8.2).** Why: a status that asks the pipeline depends on the process whose death it must report (D-006). |
 | v1.7    | 2026-09-30 | **As built — the spec synced with the code before submission.** A pre-submission review found sections that had drifted without a changelog row: the §5.2 diagram still showed the pre-v1.3 `seq > checkpoint` reader; §8.1 listed two metrics that do not exist (`pipeline_outbox_gaps_skipped_total`, obsolete since D-003; `pipeline_sink_up`, never built) and defined lag and result labels differently from the code; §9/§10 named endpoints that were built differently (D-007); §4.5 named an ES 7 exception; §4.8 was still "tentative". Changed: those sections now describe what runs; G3 stops the index in the middle of a backfill (§11 — the assignment says "in the middle of the work"); every §14 question is closed with its answer; §2.1 records what was and was not built. Nothing in the design changed in this version. |
+| v1.8    | 2026-09-30 | **§5.1: one Dockerfile, not one shared image tag.** Why: the clean-clone test (fresh clone, no build cache) failed — five services building one tag in parallel race to export it (D-009). |
 
 Rule for later versions: every change to this file gets a changelog row that says **what changed and why**
 (measurement, failed approach, agent deviation). Deviations of the implementation from this spec are
@@ -161,7 +162,8 @@ known throughput and breaker states even while the pipeline is down.
 
 ### 5.1 Components
 
-One NestJS codebase (`apps/server`), one Docker image, started in three long-running roles via `ROLE`
+One NestJS codebase (`apps/server`) and one Dockerfile (each service builds it; the images share every
+layer — a single shared image tag raced in cold builds, D-009), started in three long-running roles via `ROLE`
 (plus the one-shot `migrate` and `seed`):
 
 | Service    | Role | Why separate |

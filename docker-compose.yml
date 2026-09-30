@@ -12,11 +12,13 @@ x-verify-env: &verify-env
   API_URL: http://api:3000
   PIPELINE_METRICS_URL: http://pipeline:9100/metrics
 
+# Every server role builds the same Dockerfile. No shared `image:` name on purpose (D-009): without a
+# build cache Compose builds the five services in parallel, and five builds exporting one tag race
+# ("image already exists"). BuildKit still builds the layers once; the five images share them.
 x-server: &server
   build:
     context: .
     dockerfile: apps/server/Dockerfile
-  image: kill-it-twice/server
 
 x-server-env: &server-env
   DATABASE_URL: postgres://optio:optio@postgres:5432/optio

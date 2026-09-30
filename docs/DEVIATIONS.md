@@ -169,3 +169,20 @@ Kinds:
   under load, and 1 after a broker restart mid-backfill. No data was at risk (publisher confirms), only a
   leaked connection per occurrence.
 - Decision or accident?: accident — an agent bug, fixed.
+
+### D-009 — A cold `docker compose build` failed
+- Date / slice: 2026-09-30 / clean-clone test
+- Kind: agent
+- SPEC said: §5.1 "one Docker image, started in roles".
+- What happened: the agent gave the five server services (migrate, seed, pipeline, consumer, api) the same
+  `build` and the same `image: kill-it-twice/server` tag. With a warm build cache this never showed. In the
+  clean-clone test (fresh clone from GitHub, all containers, volumes and images removed,
+  `docker compose build --no-cache`) Compose built the five services in parallel and they raced to export the
+  one tag: `image "kill-it-twice/server:latest": already exists`, exit 1. A reviewer's first
+  `docker compose up -d --build` has no cache either.
+- Why it was wrong: one tag written by several concurrent builds is a race; "it works on my machine" was the
+  cache.
+- Resolution: no shared `image:` name — each service builds the same Dockerfile, BuildKit builds the layers
+  once and the images share them. Verified in the clone: two cold builds in a row, exit 0, ~40 s each; then
+  `up --build`, `seed.sh` and the full `verify.sh` from the clone. SPEC v1.7 §5.1 wording adjusted.
+- Decision or accident?: accident — found by the clean-clone test, which is why it was run.

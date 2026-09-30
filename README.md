@@ -18,9 +18,9 @@ G5 observability ................. PASS (status, metrics and logs answer all fiv
 
 | File | What it is |
 |------|------------|
-| [`SPEC.md`](SPEC.md) | The specification the code was built from — committed **before** any code, then changed seven times (v1 → v1.7). Each change has a changelog row saying why; v1.7 synced the spec with the code before submission and closed its open questions. |
+| [`SPEC.md`](SPEC.md) | The specification the code was built from — committed **before** any code, then changed eight times (v1 → v1.8). Each change has a changelog row saying why; v1.7 synced the spec with the code before submission and closed its open questions, v1.8 came out of the clean-clone test. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for the coding agent: slices, invariants, what not to touch, how to check its own work. |
-| [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Every place the implementation departed from the SPEC, written when it happened (D-001 … D-008). |
+| [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md) | Every place the implementation departed from the SPEC, written when it happened (D-001 … D-009). |
 
 ---
 
@@ -135,7 +135,8 @@ sequenceDiagram
   Note over L,PG: crash anywhere above ⇒ the batch is redone ⇒ sinks absorb the repeat
 ```
 
-**Processes** — one NestJS codebase, one image, started in roles (`ROLE=`):
+**Processes** — one NestJS codebase and one Dockerfile, started in roles (`ROLE=`); the service images share
+every layer:
 
 | Service | Does | Notes |
 |---------|------|-------|
@@ -415,13 +416,15 @@ nothing more.
 
 Smaller ones, all in the log: a flag in the first backfill loop that would never have logged the resume point
 if the first step failed (caught in the agent's own review before commit); a reset racing a running pipeline
-(D-001); how DLQ replay is triggered (D-004); status built from durable state only (D-006).
+(D-001); how DLQ replay is triggered (D-004); status built from durable state only (D-006); and five services
+sharing one image tag, which made a cold `docker compose build` fail — invisible with a warm cache, found by
+the clean-clone test (D-009).
 
 ---
 
 ## 10. How this was built
 
-- **SPEC first.** `SPEC.md` v1 was the first commit, before any code; it changed seven times, each with a
+- **SPEC first.** `SPEC.md` v1 was the first commit, before any code; it changed eight times, each with a
   changelog row and a reason (`git log --follow SPEC.md`).
 - **Gate first.** Each slice added its gate to `verify/` and committed it failing, then the feature
   (`test(verify): … (failing)` followed by `feat(…)`), except G3 (see §4).
