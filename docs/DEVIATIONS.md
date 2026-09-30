@@ -153,3 +153,19 @@ Kinds:
   - The UI has no way to edit source data: the source is the client's system. Fixing a bad record before a
     replay is done in Postgres (as a client would), then "Replay" in the UI.
 - Decision or accident?: decision.
+
+### D-008 — Two loops could each open a RabbitMQ connection
+- Date / slice: 2026-09-30 / final review
+- Kind: agent
+- SPEC said: nothing about connection handling; the agent's S3 `StreamSink` connected lazily with
+  `if (!channel) connect()` — an `await` between the check and the assignment.
+- What happened: found in the pre-submission review, not by a gate. When backfill and incremental both had
+  work at startup, both saw "no channel" and each opened a connection; the second assignment orphaned the
+  first, which was never used or closed. Reproduced by counting the pipeline's connections in the RabbitMQ
+  management API after restarts under load: 2 in 2 of 3 runs.
+- Why it was wrong: a check-then-act across an `await` is a race even in single-threaded Node.
+- Resolution: the connection attempt is a shared promise — every caller waits for the same attempt; a
+  connection whose channel/topology setup fails is closed. After the fix: 1 connection in 5 of 5 restarts
+  under load, and 1 after a broker restart mid-backfill. No data was at risk (publisher confirms), only a
+  leaked connection per occurrence.
+- Decision or accident?: accident — an agent bug, fixed.

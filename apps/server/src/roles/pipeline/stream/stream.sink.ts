@@ -20,6 +20,7 @@ type Connection = Awaited<ReturnType<typeof connect>>;
 export class StreamSink implements OnApplicationShutdown {
   private connection?: Connection;
   private channel?: ConfirmChannel;
+  private connecting?: Promise<ConfirmChannel>;
 
   constructor(@Inject(STREAM_BREAKER) private readonly breaker: CircuitBreaker) {}
 
@@ -63,22 +64,36 @@ export class StreamSink implements OnApplicationShutdown {
   }
 
   // Lazily (re)connects: after a broker restart the next publish simply opens a new connection.
-  private async confirmChannel(): Promise<ConfirmChannel> {
-    if (this.channel) return this.channel;
+  // Several loops publish concurrently; every caller that finds no channel waits for the SAME
+  // connection attempt. Without this, two loops starting together each opened a connection and one
+  // of them was orphaned — never used again, never closed.
+  private confirmChannel(): Promise<ConfirmChannel> {
+    if (this.channel) return Promise.resolve(this.channel);
+    this.connecting ??= this.connect().finally(() => (this.connecting = undefined));
+    return this.connecting;
+  }
+
+  private async connect(): Promise<ConfirmChannel> {
     const connection = await connect(config.rabbitmqUrl);
-    // Without an 'error' listener amqplib's EventEmitter would crash the process on a broker restart.
-    connection.on('error', (e: Error) => log('stream.connection_error', { error: e.message }, 'warn'));
-    // Only react if this is still the current connection: a late 'close' from an old, already
-    // replaced connection must not tear down the new one.
-    connection.on('close', () => this.connection === connection && this.reset());
-    const channel = await connection.createConfirmChannel();
-    channel.on('error', (e: Error) => log('stream.channel_error', { error: e.message }, 'warn'));
-    channel.on('close', () => this.channel === channel && this.reset());
-    await assertTopology(channel);
-    this.connection = connection;
-    this.channel = channel;
-    log('stream.connected', {});
-    return channel;
+    try {
+      // Without an 'error' listener amqplib's EventEmitter would crash the process on a broker restart.
+      connection.on('error', (e: Error) => log('stream.connection_error', { error: e.message }, 'warn'));
+      // Only react if this is still the current connection: a late 'close' from an old, already
+      // replaced connection must not tear down the new one.
+      connection.on('close', () => this.connection === connection && this.reset());
+      const channel = await connection.createConfirmChannel();
+      channel.on('error', (e: Error) => log('stream.channel_error', { error: e.message }, 'warn'));
+      channel.on('close', () => this.channel === channel && this.reset());
+      await assertTopology(channel);
+      this.connection = connection;
+      this.channel = channel;
+      log('stream.connected', {});
+      return channel;
+    } catch (e) {
+      // Connected but could not set up the channel/topology: do not leave the connection behind.
+      await connection.close().catch(() => undefined);
+      throw e;
+    }
   }
 
   private reset(): void {
